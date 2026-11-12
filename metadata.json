@@ -1,0 +1,6 @@
+{
+  "name": "GlideChat",
+  "description": "Fast, low-data messaging with crystal-clear audio & video calls and seamless media sharing",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
