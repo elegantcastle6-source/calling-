@@ -114,7 +114,7 @@ fun AuthScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             Text(
-                text = "GlideChat",
+                text = "Just Chat",
                 style = MaterialTheme.typography.headlineMedium.copy(
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onBackground

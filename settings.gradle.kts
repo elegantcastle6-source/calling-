@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "GlideChat"
+rootProject.name = "JustChat"
 
 include(":app")

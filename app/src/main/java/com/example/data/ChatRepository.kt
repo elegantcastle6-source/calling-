@@ -27,7 +27,7 @@ class ChatRepository(private val context: Context? = null) {
                     name = "Me",
                     gmail = "romeow9991@gmail.com",
                     avatarColorHex = 0xFF4F46E5,
-                    statusMessage = "Using GlideChat with No-Lag Low Data ⚡"
+                    statusMessage = "Using Just Chat with No-Lag Low Data ⚡"
                 )
             }
             val savedName = prefs?.getString("user_name", null)

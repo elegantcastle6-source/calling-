@@ -95,7 +95,7 @@ fun EncryptionDialog(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = "Calls, audio/video streams, and shared media between you and ${contact.name} (${contact.gmail}) are encrypted end-to-end. No one else, not even GlideChat servers, can decrypt them.",
+                    text = "Calls, audio/video streams, and shared media between you and ${contact.name} (${contact.gmail}) are encrypted end-to-end. No one else, not even Just Chat servers, can decrypt them.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

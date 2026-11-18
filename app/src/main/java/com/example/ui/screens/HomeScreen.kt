@@ -118,7 +118,7 @@ fun HomeScreen(
                     Column {
                         Text(
                             text = when (selectedTab) {
-                                0 -> "GlideChat"
+                                0 -> "Just Chat"
                                 1 -> "Call Logs"
                                 2 -> "Gmail Contacts"
                                 else -> "Settings & Data"
