@@ -1,0 +1,316 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user's profile and calling/data-saver settings.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the owner."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User's display name."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User's verified Google email address (owner-only PII)."
+        },
+        "statusMessage": {
+          "type": "string",
+          "description": "Short user status message."
+        },
+        "lowDataCallsEnabled": {
+          "type": "boolean",
+          "description": "Whether low-data calling mode is enabled."
+        },
+        "lowLatencyEnabled": {
+          "type": "boolean",
+          "description": "Whether low-latency routing optimization is enabled."
+        },
+        "totalDataSavedMb": {
+          "type": "number",
+          "description": "Cumulative estimated data saved in megabytes."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) set on creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) updated on each change."
+        }
+      },
+      "required": [
+        "userId",
+        "displayName",
+        "email",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Contact": {
+      "title": "Contact",
+      "description": "A user's chat and call contact added by Gmail address.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the owning user."
+        },
+        "name": {
+          "type": "string",
+          "description": "Contact display name."
+        },
+        "gmail": {
+          "type": "string",
+          "format": "email",
+          "description": "Contact Gmail address."
+        },
+        "avatarColorHex": {
+          "type": "integer",
+          "description": "ARGB color integer for the contact avatar."
+        },
+        "statusMessage": {
+          "type": "string",
+          "description": "Contact status message."
+        },
+        "online": {
+          "type": "boolean",
+          "description": "Whether the contact is currently online."
+        },
+        "lastSeenText": {
+          "type": "string",
+          "description": "Human-readable last seen status."
+        },
+        "securityFingerprint": {
+          "type": "string",
+          "description": "End-to-end encryption verification safety numbers."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) set on creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) updated on modification."
+        }
+      },
+      "required": [
+        "userId",
+        "name",
+        "gmail",
+        "avatarColorHex",
+        "statusMessage",
+        "online",
+        "lastSeenText",
+        "securityFingerprint",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "A text chat message belonging to a specific contact conversation.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the owning user."
+        },
+        "contactId": {
+          "type": "string",
+          "description": "ID of the parent contact document."
+        },
+        "senderId": {
+          "type": "string",
+          "description": "Identifier of the sender (current_user or contact ID)."
+        },
+        "receiverId": {
+          "type": "string",
+          "description": "Identifier of the receiver."
+        },
+        "text": {
+          "type": "string",
+          "description": "Message text content."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["SENDING", "SENT", "DELIVERED", "READ"],
+          "description": "Delivery status of the message."
+        },
+        "reactions": {
+          "type": "object",
+          "description": "Map of emoji string to reaction count."
+        },
+        "encrypted": {
+          "type": "boolean",
+          "description": "Whether the message is marked end-to-end encrypted."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) set on creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) updated on status/reaction change."
+        }
+      },
+      "required": [
+        "userId",
+        "contactId",
+        "senderId",
+        "receiverId",
+        "text",
+        "status",
+        "encrypted",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CallLog": {
+      "title": "CallLog",
+      "description": "Immutable call history entry for audio or video calls.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the owning user."
+        },
+        "contactId": {
+          "type": "string",
+          "description": "ID of the contact called."
+        },
+        "contactName": {
+          "type": "string",
+          "description": "Snapshot display name of the contact."
+        },
+        "contactGmail": {
+          "type": "string",
+          "format": "email",
+          "description": "Snapshot Gmail of the contact."
+        },
+        "contactAvatarColorHex": {
+          "type": "integer",
+          "description": "Snapshot ARGB avatar color of the contact."
+        },
+        "callType": {
+          "type": "string",
+          "enum": ["AUDIO", "VIDEO"],
+          "description": "Whether the call was audio or video."
+        },
+        "incoming": {
+          "type": "boolean",
+          "description": "Whether the call was incoming."
+        },
+        "missed": {
+          "type": "boolean",
+          "description": "Whether the call was missed."
+        },
+        "durationSeconds": {
+          "type": "integer",
+          "description": "Duration of the call in seconds."
+        },
+        "dataUsedKb": {
+          "type": "integer",
+          "description": "Estimated data used in kilobytes."
+        },
+        "lowDataMode": {
+          "type": "boolean",
+          "description": "Whether low-data mode was enabled for the call."
+        },
+        "encrypted": {
+          "type": "boolean",
+          "description": "Whether the call was end-to-end encrypted."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) set when logged."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) set when logged."
+        }
+      },
+      "required": [
+        "userId",
+        "contactId",
+        "contactName",
+        "contactGmail",
+        "contactAvatarColorHex",
+        "callType",
+        "incoming",
+        "missed",
+        "durationSeconds",
+        "dataUsedKb",
+        "lowDataMode",
+        "encrypted",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserDirectoryEntry": {
+      "title": "UserDirectoryEntry",
+      "description": "Privacy-preserving exact-match directory record keyed by the SHA-256 hash of a verified user's lowercase Gmail address. Stores no email/PII.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the registered user."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Public display name shown when another user looks up this email."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) set when registered."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) updated when display name changes."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Owner-only user profile and app preferences."
+    },
+    "/userDirectory/{emailHash}": {
+      "schema": { "$ref": "#/entities/UserDirectoryEntry" },
+      "description": "Hashed exact-match lookup directory allowing signed-in users to find registered users by SHA-256(email) without exposing emails or allowing enumeration."
+    },
+    "/users/{userId}/contacts/{contactId}": {
+      "schema": { "$ref": "#/entities/Contact" },
+      "description": "Contacts saved by the authenticated user."
+    },
+    "/users/{userId}/contacts/{contactId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/Message" },
+      "description": "Text chat messages within a contact conversation."
+    },
+    "/users/{userId}/callLogs/{callLogId}": {
+      "schema": { "$ref": "#/entities/CallLog" },
+      "description": "Immutable call history logs for the authenticated user."
+    }
+  }
+}

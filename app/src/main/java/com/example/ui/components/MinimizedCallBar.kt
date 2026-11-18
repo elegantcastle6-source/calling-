@@ -47,6 +47,23 @@ fun MinimizedCallBar(
     onExpand: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    MinimizedCallBar(
+        callState = callState,
+        onToggleMute = { callManager.toggleMute() },
+        onEndCall = { callManager.endCall() },
+        onExpand = onExpand,
+        modifier = modifier
+    )
+}
+
+@Composable
+fun MinimizedCallBar(
+    callState: ActiveCallState,
+    onToggleMute: () -> Unit,
+    onEndCall: () -> Unit,
+    onExpand: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     Card(
         colors = CardDefaults.cardColors(
             containerColor = Color(0xF00F172A)
@@ -119,7 +136,7 @@ fun MinimizedCallBar(
             ) {
                 // Mute
                 IconButton(
-                    onClick = { callManager.toggleMute() },
+                    onClick = onToggleMute,
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
@@ -151,7 +168,7 @@ fun MinimizedCallBar(
 
                 // End Call
                 IconButton(
-                    onClick = { callManager.endCall() },
+                    onClick = onEndCall,
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)

@@ -1,0 +1,252 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Hardened Primitives ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isValidEmailHash(emailHash) {
+      return emailHash is string &&
+             emailHash.size() == 64 &&
+             emailHash.matches('^[a-f0-9]{64}$');
+    }
+
+    function hasVerifiedEmailHash(emailHash) {
+      return isSignedIn() &&
+             request.auth.token.email is string &&
+             request.auth.token.email_verified == true &&
+             hashing.sha256(request.auth.token.email.trim().lower()).toHexString().lower() == emailHash;
+    }
+
+    // --- Entity Validation Blueprints ---
+    function isValidUserProfile(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+             data.email is string && data.email.size() >= 3 && data.email.size() <= 120 &&
+             (!('statusMessage' in data) || data.statusMessage == null || (data.statusMessage is string && data.statusMessage.size() <= 160)) &&
+             (!('lowDataCallsEnabled' in data) || data.lowDataCallsEnabled is bool) &&
+             (!('lowLatencyEnabled' in data) || data.lowLatencyEnabled is bool) &&
+             (!('totalDataSavedMb' in data) || (data.totalDataSavedMb is number && data.totalDataSavedMb >= 0 && data.totalDataSavedMb <= 1000000)) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidContact(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             data.gmail is string && data.gmail.size() >= 3 && data.gmail.size() <= 120 &&
+             data.avatarColorHex is int &&
+             data.statusMessage is string && data.statusMessage.size() <= 160 &&
+             data.online is bool &&
+             data.lastSeenText is string && data.lastSeenText.size() <= 80 &&
+             data.securityFingerprint is string && data.securityFingerprint.size() >= 1 && data.securityFingerprint.size() <= 80 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidMessage(data, userId, contactId) {
+      return data.userId is string && data.userId == userId &&
+             data.contactId is string && data.contactId == contactId &&
+             data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
+             data.receiverId is string && data.receiverId.size() >= 1 && data.receiverId.size() <= 128 &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 2000 &&
+             data.status is string && data.status in ['SENDING', 'SENT', 'DELIVERED', 'READ'] &&
+             (!('reactions' in data) || data.reactions == null || (data.reactions is map && data.reactions.size() <= 20)) &&
+             data.encrypted is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidCallLog(data, userId) {
+      return data.userId is string && data.userId == userId &&
+             data.contactId is string && isValidId(data.contactId) &&
+             data.contactName is string && data.contactName.size() >= 1 && data.contactName.size() <= 80 &&
+             data.contactGmail is string && data.contactGmail.size() >= 3 && data.contactGmail.size() <= 120 &&
+             data.contactAvatarColorHex is int &&
+             data.callType is string && data.callType in ['AUDIO', 'VIDEO'] &&
+             data.incoming is bool &&
+             data.missed is bool &&
+             data.durationSeconds is int && data.durationSeconds >= 0 && data.durationSeconds <= 86400 &&
+             data.dataUsedKb is int && data.dataUsedKb >= 0 && data.dataUsedKb <= 100000000 &&
+             data.lowDataMode is bool &&
+             data.encrypted is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidDirectoryEntry(data) {
+      return data.uid is string && data.uid == request.auth.uid && isValidId(data.uid) &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    // --- Collection Rules ---
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'email', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'displayName', 'email', 'statusMessage',
+                         'lowDataCallsEnabled', 'lowLatencyEnabled', 'totalDataSavedMb',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidUserProfile(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt && (
+                         incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'statusMessage', 'updatedAt']) ||
+                         incoming().diff(existing()).affectedKeys().hasOnly(['lowDataCallsEnabled', 'lowLatencyEnabled', 'totalDataSavedMb', 'updatedAt']) ||
+                         incoming().diff(existing()).affectedKeys().hasOnly(['lowDataCallsEnabled', 'updatedAt']) ||
+                         incoming().diff(existing()).affectedKeys().hasOnly(['lowLatencyEnabled', 'updatedAt']) ||
+                         incoming().diff(existing()).affectedKeys().hasOnly(['totalDataSavedMb', 'updatedAt'])
+                       );
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /contacts/{contactId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId) && isValidId(contactId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(contactId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'name', 'gmail', 'avatarColorHex', 'statusMessage',
+                           'online', 'lastSeenText', 'securityFingerprint', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'name', 'gmail', 'avatarColorHex', 'statusMessage',
+                           'online', 'lastSeenText', 'securityFingerprint', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidContact(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(contactId) &&
+                         isValidContact(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'name', 'statusMessage', 'online', 'lastSeenText', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(contactId);
+
+        match /messages/{messageId} {
+          allow list: if isOwner(userId) && isValidId(contactId);
+          allow get: if isOwner(userId) && isValidId(contactId) && isValidId(messageId);
+
+          allow create: if isOwner(userId) &&
+                           isValidId(contactId) &&
+                           isValidId(messageId) &&
+                           incoming().keys().hasAll([
+                             'userId', 'contactId', 'senderId', 'receiverId',
+                             'text', 'status', 'encrypted', 'createdAt', 'updatedAt'
+                           ]) &&
+                           incoming().keys().hasOnly([
+                             'userId', 'contactId', 'senderId', 'receiverId',
+                             'text', 'status', 'reactions', 'encrypted', 'createdAt', 'updatedAt'
+                           ]) &&
+                           isValidMessage(incoming(), userId, contactId) &&
+                           exists(/databases/$(database)/documents/users/$(userId)/contacts/$(contactId));
+
+          allow update: if isOwner(userId) &&
+                           isValidId(contactId) &&
+                           isValidId(messageId) &&
+                           isValidMessage(incoming(), userId, contactId) &&
+                           incoming().userId == existing().userId &&
+                           incoming().contactId == existing().contactId &&
+                           incoming().senderId == existing().senderId &&
+                           incoming().receiverId == existing().receiverId &&
+                           incoming().createdAt == existing().createdAt && (
+                             incoming().diff(existing()).affectedKeys().hasOnly(['reactions', 'updatedAt']) ||
+                             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+                           );
+
+          allow delete: if isOwner(userId) && isValidId(contactId) && isValidId(messageId);
+        }
+      }
+
+      match /callLogs/{callLogId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId) && isValidId(callLogId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(callLogId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'contactId', 'contactName', 'contactGmail',
+                           'contactAvatarColorHex', 'callType', 'incoming', 'missed',
+                           'durationSeconds', 'dataUsedKb', 'lowDataMode', 'encrypted',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'contactId', 'contactName', 'contactGmail',
+                           'contactAvatarColorHex', 'callType', 'incoming', 'missed',
+                           'durationSeconds', 'dataUsedKb', 'lowDataMode', 'encrypted',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidCallLog(incoming(), userId);
+
+        allow update: if false;
+        allow delete: if isOwner(userId) && isValidId(callLogId);
+      }
+    }
+
+    match /userDirectory/{emailHash} {
+      // Exact-match lookup by SHA-256(lowercase email) only; zero PII stored and listing is denied.
+      allow list: if false;
+      allow get: if isSignedIn() && isValidEmailHash(emailHash);
+
+      allow create: if isSignedIn() &&
+                       isValidEmailHash(emailHash) &&
+                       hasVerifiedEmailHash(emailHash) &&
+                       incoming().keys().hasAll(['uid', 'displayName', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['uid', 'displayName', 'createdAt', 'updatedAt']) &&
+                       isValidDirectoryEntry(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidEmailHash(emailHash) &&
+                       hasVerifiedEmailHash(emailHash) &&
+                       isValidDirectoryEntry(incoming()) &&
+                       existing().uid == request.auth.uid &&
+                       incoming().uid == existing().uid &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt']);
+
+      allow delete: if isSignedIn() &&
+                       isValidEmailHash(emailHash) &&
+                       existing().uid == request.auth.uid;
+    }
+  }
+}
