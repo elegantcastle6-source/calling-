@@ -20,6 +20,9 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    ndk {
+      abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+    }
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
@@ -123,8 +126,8 @@ dependencies {
   // implementation(libs.okhttp)
   // implementation(libs.play.services.location)
   // implementation(libs.retrofit)
-  // Commented out unused Agora full-sdk (bundled ~240MB of 4KB-aligned .so libs that broke APK install/size limits)
-  // implementation(libs.agora.rtc.full)
+  // Agora Voice/Video Call SDK (16KB-aligned lightweight lite-sdk for voice & video calls)
+  implementation(libs.agora.rtc.lite)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

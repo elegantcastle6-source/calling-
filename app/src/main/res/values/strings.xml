@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">Just Chat</string>
+    <string name="agora_missing_app_id_note">Set AGORA_APP_ID in AI Studio Secrets to connect live Agora voice &amp; video calls.</string>
+    <string name="agora_connecting_channel">Connecting via Agora RTC…</string>
+    <string name="agora_waiting_for_peer">Connected • Waiting for %1$s to join</string>
+    <string name="agora_peer_left">%1$s left the call</string>
+    <string name="agora_live_video_label">Live Video</string>
+    <string name="call_speaker_on_desc">Turn off speakerphone</string>
+    <string name="call_speaker_off_desc">Turn on speakerphone</string>
 </resources>

@@ -2,6 +2,7 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.example.data.AgoraCallController
 import com.example.data.CallManager
 import com.example.data.ChatRepository
 import com.example.model.CallType
@@ -115,5 +116,23 @@ class ExampleRobolectricTest {
         assertEquals(0.0f, callManager.activeCall.value?.packetLossPercent)
 
         callManager.endCall()
+    }
+
+    @Test
+    fun `agora channel name is deterministic and symmetric for two gmails`() {
+        val ch1 = AgoraCallController.buildChannelName("Alice@Gmail.com ", "bob@gmail.com")
+        val ch2 = AgoraCallController.buildChannelName("BOB@gmail.com", "alice@gmail.com")
+        assertEquals(ch1, ch2)
+        assertTrue(ch1.startsWith("jc_"))
+        assertTrue(ch1.length <= 64)
+        assertTrue(ch1.all { it.isLetterOrDigit() || it == '_' })
+    }
+
+    @Test
+    fun `agora app id validation rejects placeholders and accepts real hex id`() {
+        assertFalse(AgoraCallController.isValidAppId(""))
+        assertFalse(AgoraCallController.isValidAppId("YOUR_AGORA_APP_ID"))
+        assertFalse(AgoraCallController.isValidAppId("YAHAN_APNI_AGORA_APP_ID_PASTE_KAREIN"))
+        assertTrue(AgoraCallController.isValidAppId("9f86d081884c7d659a2feaa0c55ad015"))
     }
 }

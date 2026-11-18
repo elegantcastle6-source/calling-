@@ -37,6 +37,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.example.data.AgoraCallController
 import com.example.data.FirestoreChatRepository
 import com.example.data.UserManager
 import com.example.data.authStateFlow
@@ -119,6 +120,7 @@ private fun AuthenticatedJustChatContent(
                 JustChatViewModel(
                     repository = FirestoreChatRepository(db),
                     userManager = UserManager(db),
+                    agoraController = AgoraCallController(app.applicationContext),
                     currentUserId = firebaseUser.uid,
                     initialUser = firebaseUser
                 )
@@ -185,7 +187,14 @@ private fun AuthenticatedJustChatContent(
                             onToggleCameraFacing = { viewModel.toggleCameraFacing() },
                             onSetMinimized = { viewModel.setMinimized(it) },
                             onAnswerCall = { viewModel.answerCall() },
-                            onEndCall = { viewModel.endCall() }
+                            onEndCall = { viewModel.endCall() },
+                            onToggleSpeaker = { viewModel.toggleSpeaker() },
+                            onAttachLocalVideo = { surfaceView -> viewModel.attachLocalVideo(surfaceView) },
+                            onDetachLocalVideo = { viewModel.detachLocalVideo() },
+                            onAttachRemoteVideo = { uid, surfaceView ->
+                                viewModel.attachRemoteVideo(uid, surfaceView)
+                            },
+                            onDetachRemoteVideo = { uid -> viewModel.detachRemoteVideo(uid) }
                         )
                     }
                 }

@@ -19,6 +19,7 @@ val EmeraldOnContainer = Color(0xFF064E3B)
 
 val CallRed = Color(0xFFEF4444)
 val CallGreen = Color(0xFF22C55E)
+val CallAmber = Color(0xFFFBBF24)
 val DataSaverCyan = Color(0xFF0EA5E9)
 
 val DarkSurface = Color(0xFF0F172A)

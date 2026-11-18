@@ -1,8 +1,12 @@
 package com.example.viewmodel
 
 import android.util.Log
+import android.view.SurfaceView
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.AgoraCallController
+import com.example.data.AgoraCallListener
+import com.example.data.AgoraCallStats
 import com.example.data.DirectoryUser
 import com.example.data.FirestoreChatRepository
 import com.example.data.UserManager
@@ -35,7 +39,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
-import kotlin.random.Random
 
 sealed interface UiState<out T> {
     data object Loading : UiState<Nothing>
@@ -55,6 +58,7 @@ sealed interface UserSearchUiState {
 class JustChatViewModel(
     private val repository: FirestoreChatRepository,
     private val userManager: UserManager,
+    private val agoraController: AgoraCallController,
     private val currentUserId: String,
     initialUser: FirebaseUser
 ) : ViewModel() {
@@ -282,12 +286,25 @@ class JustChatViewModel(
         }
     }
 
-    // --- Active Call State Management ---
+    // --- Active Call State Management (Agora RTC) ---
+
+    private fun currentUserEmail(): String {
+        return (profileState.value as? UiState.Success)?.data?.email
+            ?.takeIf { it.isNotBlank() }
+            ?: fallbackUser.gmail
+    }
 
     fun startCall(contact: User, type: CallType) {
+        callTickerJob?.cancel()
+        agoraController.leaveCall()
+
         val lowDataMode = (profileState.value as? UiState.Success)?.data?.lowDataCallsEnabled ?: true
+        val channelName = AgoraCallController.buildChannelName(currentUserEmail(), contact.gmail)
+        val agoraConfigured = agoraController.isConfigured
+        val callId = UUID.randomUUID().toString()
+
         val initialCall = ActiveCallState(
-            callId = UUID.randomUUID().toString(),
+            callId = callId,
             contact = contact,
             callType = type,
             status = CallStatus.DIALING,
@@ -297,30 +314,38 @@ class JustChatViewModel(
             isSpeakerOn = type == CallType.VIDEO,
             isLowDataMode = lowDataMode,
             durationSeconds = 0,
-            latencyMs = 15,
-            dataRateKbps = if (lowDataMode) {
-                if (type == CallType.VIDEO) 42 else 12
+            latencyMs = 0,
+            dataRateKbps = 0,
+            totalDataKb = 0L,
+            channelName = channelName,
+            remoteUid = null,
+            isAgoraConfigured = agoraConfigured,
+            connectionNote = if (agoraConfigured) {
+                "Connecting via Agora RTC…"
             } else {
-                if (type == CallType.VIDEO) 280 else 36
-            },
-            totalDataKb = 0L
+                MISSING_AGORA_NOTE
+            }
         )
         _activeCall.value = initialCall
 
-        callTickerJob?.cancel()
-        callTickerJob = viewModelScope.launch(Dispatchers.Default) {
-            delay(2200)
-            if (_activeCall.value?.callId == initialCall.callId &&
-                _activeCall.value?.status == CallStatus.DIALING
-            ) {
-                _activeCall.update { it?.copy(status = CallStatus.CONNECTED) }
-                runCallTicker()
-            }
+        if (agoraConfigured) {
+            agoraController.joinCall(
+                channelName = channelName,
+                isVideo = type == CallType.VIDEO,
+                isLowDataMode = lowDataMode,
+                listener = createAgoraListener(callId = callId, contactName = contact.name)
+            )
         }
     }
 
     fun receiveIncomingCall(contact: User, type: CallType) {
+        callTickerJob?.cancel()
+        agoraController.leaveCall()
+
         val lowDataMode = (profileState.value as? UiState.Success)?.data?.lowDataCallsEnabled ?: true
+        val channelName = AgoraCallController.buildChannelName(currentUserEmail(), contact.gmail)
+        val agoraConfigured = agoraController.isConfigured
+
         _activeCall.value = ActiveCallState(
             callId = UUID.randomUUID().toString(),
             contact = contact,
@@ -332,33 +357,95 @@ class JustChatViewModel(
             isSpeakerOn = type == CallType.VIDEO,
             isLowDataMode = lowDataMode,
             durationSeconds = 0,
-            latencyMs = 14,
-            dataRateKbps = if (lowDataMode) 40 else 260,
-            totalDataKb = 0L
+            latencyMs = 0,
+            dataRateKbps = 0,
+            totalDataKb = 0L,
+            channelName = channelName,
+            remoteUid = null,
+            isAgoraConfigured = agoraConfigured,
+            connectionNote = if (agoraConfigured) null else MISSING_AGORA_NOTE
         )
     }
 
     fun answerCall() {
         val current = _activeCall.value ?: return
-        if (current.status == CallStatus.INCOMING_RINGING) {
-            _activeCall.update { it?.copy(status = CallStatus.CONNECTED) }
-            callTickerJob?.cancel()
-            callTickerJob = viewModelScope.launch(Dispatchers.Default) {
-                runCallTicker()
+        if (current.status != CallStatus.INCOMING_RINGING) return
+
+        if (agoraController.isConfigured) {
+            _activeCall.update {
+                it?.copy(
+                    status = CallStatus.DIALING,
+                    isAgoraConfigured = true,
+                    connectionNote = "Connecting via Agora RTC…"
+                )
+            }
+            agoraController.joinCall(
+                channelName = current.channelName.ifBlank {
+                    AgoraCallController.buildChannelName(currentUserEmail(), current.contact.gmail)
+                },
+                isVideo = current.callType == CallType.VIDEO,
+                isLowDataMode = current.isLowDataMode,
+                listener = createAgoraListener(callId = current.callId, contactName = current.contact.name)
+            )
+        } else {
+            _activeCall.update {
+                it?.copy(
+                    status = CallStatus.DIALING,
+                    isAgoraConfigured = false,
+                    connectionNote = MISSING_AGORA_NOTE
+                )
             }
         }
     }
 
     fun toggleMute() {
-        _activeCall.update { it?.copy(isMuted = !it.isMuted) }
+        val nextMuted = !(_activeCall.value?.isMuted ?: false)
+        _activeCall.update { it?.copy(isMuted = nextMuted) }
+        if (_activeCall.value?.isAgoraConfigured == true) {
+            agoraController.setMuted(nextMuted)
+        }
     }
 
     fun toggleCamera() {
-        _activeCall.update { it?.copy(isCameraOn = !it.isCameraOn) }
+        val current = _activeCall.value ?: return
+        val nextCameraOn = !current.isCameraOn
+        _activeCall.update { it?.copy(isCameraOn = nextCameraOn) }
+        if (current.isAgoraConfigured) {
+            agoraController.setCameraEnabled(nextCameraOn, current.isLowDataMode)
+        }
     }
 
     fun toggleCameraFacing() {
+        val current = _activeCall.value ?: return
         _activeCall.update { it?.copy(isFrontCamera = !it.isFrontCamera) }
+        if (current.isAgoraConfigured) {
+            agoraController.switchCamera()
+        }
+    }
+
+    fun toggleSpeaker() {
+        val current = _activeCall.value ?: return
+        val nextSpeaker = !current.isSpeakerOn
+        _activeCall.update { it?.copy(isSpeakerOn = nextSpeaker) }
+        if (current.isAgoraConfigured) {
+            agoraController.setSpeakerEnabled(nextSpeaker)
+        }
+    }
+
+    fun attachLocalVideo(surfaceView: SurfaceView) {
+        agoraController.attachLocalVideo(surfaceView)
+    }
+
+    fun detachLocalVideo() {
+        agoraController.detachLocalVideo()
+    }
+
+    fun attachRemoteVideo(uid: Int, surfaceView: SurfaceView) {
+        agoraController.attachRemoteVideo(uid, surfaceView)
+    }
+
+    fun detachRemoteVideo(uid: Int) {
+        agoraController.detachRemoteVideo(uid)
     }
 
     fun setMinimized(minimized: Boolean) {
@@ -367,6 +454,7 @@ class JustChatViewModel(
 
     fun endCall(persistLog: Boolean = true) {
         callTickerJob?.cancel()
+        agoraController.leaveCall()
         val finishedCall = _activeCall.value
         _activeCall.value = null
         if (persistLog && finishedCall != null) {
@@ -387,31 +475,83 @@ class JustChatViewModel(
         }
     }
 
-    private suspend fun runCallTicker() {
-        while (viewModelScope.isActive && _activeCall.value?.status == CallStatus.CONNECTED) {
-            delay(1000)
-            _activeCall.update { call ->
-                if (call == null || call.status != CallStatus.CONNECTED) return@update call
-                val baseLatency = if (call.isLowDataMode) 14 else 18
-                val rate = if (call.isLowDataMode) {
-                    if (call.callType == CallType.VIDEO && call.isCameraOn) {
-                        Random.nextInt(38, 48)
-                    } else {
-                        Random.nextInt(10, 15)
-                    }
-                } else {
-                    if (call.callType == CallType.VIDEO && call.isCameraOn) {
-                        Random.nextInt(260, 320)
-                    } else {
-                        Random.nextInt(32, 44)
-                    }
+    private fun createAgoraListener(callId: String, contactName: String): AgoraCallListener {
+        return object : AgoraCallListener {
+            override fun onJoinedChannel(channel: String, uid: Int) {
+                if (_activeCall.value?.callId != callId) return
+                _activeCall.update { call ->
+                    if (call == null || call.callId != callId) return@update call
+                    call.copy(
+                        status = CallStatus.CONNECTED,
+                        channelName = channel.ifBlank { call.channelName },
+                        connectionNote = if (call.remoteUid == null) {
+                            "Connected • Waiting for $contactName to join"
+                        } else {
+                            null
+                        }
+                    )
                 }
-                call.copy(
-                    durationSeconds = call.durationSeconds + 1,
-                    latencyMs = (baseLatency + Random.nextInt(-3, 4)).coerceAtLeast(8),
-                    dataRateKbps = rate,
-                    totalDataKb = call.totalDataKb + rate
-                )
+                startCallDurationTicker(callId)
+            }
+
+            override fun onRemoteUserJoined(uid: Int) {
+                _activeCall.update { call ->
+                    if (call == null || call.callId != callId) return@update call
+                    call.copy(
+                        status = CallStatus.CONNECTED,
+                        remoteUid = uid,
+                        connectionNote = null
+                    )
+                }
+            }
+
+            override fun onRemoteUserLeft(uid: Int, reason: Int) {
+                _activeCall.update { call ->
+                    if (call == null || call.callId != callId) return@update call
+                    if (call.remoteUid != uid) return@update call
+                    call.copy(
+                        remoteUid = null,
+                        connectionNote = "$contactName left the call"
+                    )
+                }
+            }
+
+            override fun onStatsUpdated(stats: AgoraCallStats) {
+                _activeCall.update { call ->
+                    if (call == null || call.callId != callId) return@update call
+                    call.copy(
+                        latencyMs = stats.latencyMs,
+                        dataRateKbps = stats.bitrateKbps,
+                        totalDataKb = stats.totalDataKb,
+                        packetLossPercent = stats.packetLossPercent
+                    )
+                }
+            }
+
+            override fun onError(errorCode: Int, message: String) {
+                _activeCall.update { call ->
+                    if (call == null || call.callId != callId) return@update call
+                    call.copy(connectionNote = message)
+                }
+            }
+        }
+    }
+
+    private fun startCallDurationTicker(callId: String) {
+        callTickerJob?.cancel()
+        callTickerJob = viewModelScope.launch(Dispatchers.Default) {
+            while (viewModelScope.isActive) {
+                delay(1000)
+                val active = _activeCall.value
+                if (active == null || active.callId != callId || active.status != CallStatus.CONNECTED) {
+                    break
+                }
+                _activeCall.update { call ->
+                    if (call == null || call.callId != callId || call.status != CallStatus.CONNECTED) {
+                        return@update call
+                    }
+                    call.copy(durationSeconds = call.durationSeconds + 1)
+                }
             }
         }
     }
@@ -419,10 +559,13 @@ class JustChatViewModel(
     override fun onCleared() {
         super.onCleared()
         callTickerJob?.cancel()
+        agoraController.destroy()
     }
 
     private companion object {
         const val TAG = "JustChatViewModel"
         const val STOP_TIMEOUT_MS = 5000L
+        const val MISSING_AGORA_NOTE =
+            "Set AGORA_APP_ID in AI Studio Secrets to connect live Agora voice & video calls."
     }
 }

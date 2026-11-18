@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.view.SurfaceView
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -25,6 +26,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Mic
@@ -32,6 +35,8 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.rounded.Cameraswitch
+import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material3.Icon
@@ -40,7 +45,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -50,9 +57,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import com.example.R
 import com.example.data.CallManager
 import com.example.model.ActiveCallState
 import com.example.model.CallStatus
@@ -60,6 +70,7 @@ import com.example.model.CallType
 import com.example.ui.components.CameraPreview
 import com.example.ui.components.EncryptionDialog
 import com.example.ui.components.UserAvatar
+import com.example.ui.theme.CallAmber
 import com.example.ui.theme.CallGreen
 import com.example.ui.theme.CallRed
 import com.example.ui.theme.DarkBackground
@@ -94,9 +105,20 @@ fun CallScreen(
     onSetMinimized: (Boolean) -> Unit,
     onAnswerCall: () -> Unit,
     onEndCall: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onToggleSpeaker: (() -> Unit)? = null,
+    onAttachLocalVideo: ((SurfaceView) -> Unit)? = null,
+    onDetachLocalVideo: (() -> Unit)? = null,
+    onAttachRemoteVideo: ((Int, SurfaceView) -> Unit)? = null,
+    onDetachRemoteVideo: ((Int) -> Unit)? = null
 ) {
     var showEncryptionDialog by remember { mutableStateOf(false) }
+    val remoteUid = callState.remoteUid
+    val isShowingRemoteVideo =
+        callState.isAgoraConfigured &&
+            remoteUid != null &&
+            callState.callType == CallType.VIDEO &&
+            onAttachRemoteVideo != null
 
     BackHandler {
         onEndCall()
@@ -144,7 +166,42 @@ fun CallScreen(
                     )
                 )
         ) {
-            // Top bar: Minimize & E2EE badge
+            // Full-screen Remote Agora Video when peer joins a video call
+            if (isShowingRemoteVideo) {
+                val activeRemoteUid = remoteUid!!
+                val attachRemote = onAttachRemoteVideo!!
+                key(activeRemoteUid) {
+                    DisposableEffect(activeRemoteUid) {
+                        onDispose {
+                            onDetachRemoteVideo?.invoke(activeRemoteUid)
+                        }
+                    }
+                    AndroidView(
+                        factory = { ctx ->
+                            SurfaceView(ctx).also { surfaceView ->
+                                attachRemote(activeRemoteUid, surfaceView)
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("agora_remote_video_view")
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                0.0f to Color.Black.copy(alpha = 0.55f),
+                                0.30f to Color.Transparent,
+                                0.72f to Color.Transparent,
+                                1.0f to Color.Black.copy(alpha = 0.65f)
+                            )
+                        )
+                )
+            }
+
+            // Top bar: Minimize, E2EE badge & Speaker toggle
             Row(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
@@ -192,7 +249,40 @@ fun CallScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.size(48.dp))
+                if (onToggleSpeaker != null) {
+                    IconButton(
+                        onClick = onToggleSpeaker,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (callState.isSpeakerOn) {
+                                    IndigoPrimary.copy(alpha = 0.75f)
+                                } else {
+                                    Color.Black.copy(alpha = 0.35f)
+                                }
+                            )
+                            .testTag("call_speaker_button")
+                    ) {
+                        Icon(
+                            imageVector = if (callState.isSpeakerOn) {
+                                Icons.AutoMirrored.Rounded.VolumeUp
+                            } else {
+                                Icons.AutoMirrored.Rounded.VolumeOff
+                            },
+                            contentDescription = stringResource(
+                                if (callState.isSpeakerOn) {
+                                    R.string.call_speaker_on_desc
+                                } else {
+                                    R.string.call_speaker_off_desc
+                                }
+                            ),
+                            tint = Color.White
+                        )
+                    }
+                } else {
+                    Spacer(modifier = Modifier.size(48.dp))
+                }
             }
 
             // Caller Info at top
@@ -222,29 +312,67 @@ fun CallScreen(
                     },
                     textAlign = TextAlign.Center
                 )
+
+                val note = callState.connectionNote
+                if (!note.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.Black.copy(alpha = 0.45f))
+                            .border(
+                                width = 1.dp,
+                                color = Color.White.copy(alpha = 0.16f),
+                                shape = RoundedCornerShape(14.dp)
+                            )
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .testTag("call_connection_note"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (callState.isAgoraConfigured) {
+                                Icons.Rounded.GraphicEq
+                            } else {
+                                Icons.Rounded.Info
+                            },
+                            contentDescription = null,
+                            tint = if (callState.isAgoraConfigured) CallGreen else CallAmber,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = note,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color.White.copy(alpha = 0.92f),
+                            textAlign = TextAlign.Start
+                        )
+                    }
+                }
             }
 
-            // Center Avatar with subtle pulse during active/ringing call
-            Box(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .size(200.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                if (callState.status == CallStatus.CONNECTED || callState.status == CallStatus.DIALING) {
-                    Box(
-                        modifier = Modifier
-                            .size(140.dp * pulseScale)
-                            .clip(CircleShape)
-                            .background(IndigoPrimary.copy(alpha = 0.18f))
+            // Center Avatar with subtle pulse when remote video is not active
+            if (!isShowingRemoteVideo) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(200.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (callState.status == CallStatus.CONNECTED || callState.status == CallStatus.DIALING) {
+                        Box(
+                            modifier = Modifier
+                                .size(140.dp * pulseScale)
+                                .clip(CircleShape)
+                                .background(IndigoPrimary.copy(alpha = 0.18f))
+                        )
+                    }
+                    UserAvatar(
+                        name = callState.contact.name,
+                        avatarColorHex = callState.contact.avatarColorHex,
+                        size = 112.dp,
+                        showOnlineIndicator = false
                     )
                 }
-                UserAvatar(
-                    name = callState.contact.name,
-                    avatarColorHex = callState.contact.avatarColorHex,
-                    size = 112.dp,
-                    showOnlineIndicator = false
-                )
             }
 
             // Self Video PiP when camera is enabled
@@ -259,17 +387,37 @@ fun CallScreen(
                         .border(1.5.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
                         .background(Color.Black)
                 ) {
-                    CameraPreview(
-                        isCameraOn = true,
-                        isFrontCamera = callState.isFrontCamera,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    if (callState.isAgoraConfigured && onAttachLocalVideo != null) {
+                        DisposableEffect(callState.callId) {
+                            onDispose {
+                                onDetachLocalVideo?.invoke()
+                            }
+                        }
+                        AndroidView(
+                            factory = { ctx ->
+                                SurfaceView(ctx).apply {
+                                    setZOrderMediaOverlay(true)
+                                }.also { surfaceView ->
+                                    onAttachLocalVideo(surfaceView)
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .testTag("agora_local_video_view")
+                        )
+                    } else {
+                        CameraPreview(
+                            isCameraOn = true,
+                            isFrontCamera = callState.isFrontCamera,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                     IconButton(
                         onClick = onToggleCameraFacing,
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
                             .padding(4.dp)
-                            .size(36.dp)
+                            .size(48.dp)
                             .clip(CircleShape)
                             .background(Color.Black.copy(alpha = 0.55f))
                             .testTag("switch_camera_button")
@@ -278,7 +426,7 @@ fun CallScreen(
                             imageVector = Icons.Rounded.Cameraswitch,
                             contentDescription = "Switch Camera",
                             tint = Color.White,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }

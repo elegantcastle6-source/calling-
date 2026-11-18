@@ -108,5 +108,9 @@ data class ActiveCallState(
     val packetLossPercent: Float = 0.0f,
     val jitterMs: Int = 2,
     val networkQualityRating: String = "Ultra-Fast (5/5)",
-    val isMinimized: Boolean = false
+    val isMinimized: Boolean = false,
+    val channelName: String = "",
+    val remoteUid: Int? = null,
+    val isAgoraConfigured: Boolean = false,
+    val connectionNote: String? = null
 )
