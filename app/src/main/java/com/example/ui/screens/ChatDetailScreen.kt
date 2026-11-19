@@ -29,8 +29,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Call
-import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.DoneAll
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.Card
@@ -66,12 +64,11 @@ import androidx.compose.ui.unit.sp
 import com.example.model.CallType
 import com.example.model.ChatMessage
 import com.example.model.MediaType
-import com.example.model.MessageStatus
 import com.example.model.User
 import com.example.ui.components.EncryptionDialog
+import com.example.ui.components.MessageTickIcon
 import com.example.ui.components.UserAvatar
 import com.example.ui.theme.CallGreen
-import com.example.ui.theme.DataSaverCyan
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -552,30 +549,7 @@ private fun TextMessageBubble(
                     )
 
                     if (isMe) {
-                        when (message.status) {
-                            MessageStatus.SENDING -> Icon(
-                                imageVector = Icons.Rounded.Check,
-                                contentDescription = "Sending",
-                                tint = contentColor.copy(alpha = 0.5f),
-                                modifier = Modifier.size(12.dp)
-                            )
-                            MessageStatus.SENT -> Icon(
-                                imageVector = Icons.Rounded.Check,
-                                contentDescription = "Sent",
-                                tint = contentColor.copy(alpha = 0.8f),
-                                modifier = Modifier.size(12.dp)
-                            )
-                            MessageStatus.DELIVERED, MessageStatus.READ -> Icon(
-                                imageVector = Icons.Rounded.DoneAll,
-                                contentDescription = "Delivered or Read",
-                                tint = if (message.status == MessageStatus.READ) {
-                                    DataSaverCyan
-                                } else {
-                                    contentColor.copy(alpha = 0.8f)
-                                },
-                                modifier = Modifier.size(14.dp)
-                            )
-                        }
+                        MessageTickIcon(status = message.status)
                     }
                 }
             }

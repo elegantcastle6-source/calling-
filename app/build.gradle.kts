@@ -13,15 +13,15 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.glidechat.kvxp"
+    applicationId = "com.justchat.app"
     minSdk = 24
-    targetSdk = 36
+    targetSdk = 34
     versionCode = 1
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     ndk {
-      abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+      abiFilters += listOf("armeabi-v7a", "arm64-v8a")
     }
   }
 
@@ -112,6 +112,7 @@ dependencies {
   // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
   implementation(libs.firebase.firestore)
+  implementation(libs.firebase.database)
   implementation(libs.firebase.auth)
   implementation(libs.firebase.analytics)
   implementation(libs.androidx.credentials)
@@ -123,11 +124,11 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
-  // implementation(libs.okhttp)
+  implementation(libs.okhttp)
   // implementation(libs.play.services.location)
-  // implementation(libs.retrofit)
-  // Agora Voice/Video Call SDK (16KB-aligned lightweight lite-sdk for voice & video calls)
-  implementation(libs.agora.rtc.lite)
+  implementation(libs.retrofit)
+  // Agora Voice Call SDK (lightweight audio-only SDK)
+  implementation(libs.agora.rtc.voice)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

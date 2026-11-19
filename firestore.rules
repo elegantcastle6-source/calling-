@@ -38,11 +38,37 @@ service cloud.firestore {
              emailHash.matches('^[a-f0-9]{64}$');
     }
 
-    function hasVerifiedEmailHash(emailHash) {
+    function hasVerifiedEmail() {
       return isSignedIn() &&
              request.auth.token.email is string &&
              request.auth.token.email_verified == true &&
-             hashing.sha256(request.auth.token.email.trim().lower()).toHexString().lower() == emailHash;
+             request.auth.token.email.trim().size() >= 3 &&
+             request.auth.token.email.trim().size() <= 120;
+    }
+
+    function verifiedEmail() {
+      return request.auth.token.email.trim().lower();
+    }
+
+    function hasVerifiedEmailHash(emailHash) {
+      return hasVerifiedEmail() &&
+             hashing.sha256(verifiedEmail()).toHexString().lower() == emailHash;
+    }
+
+    function isValidChatRoomId(roomId) {
+      return roomId is string &&
+             roomId.size() >= 3 &&
+             roomId.size() <= 256 &&
+             roomId.matches('^[a-z0-9_]+$');
+    }
+
+    function isRoomIdParticipant(roomId) {
+      return hasVerifiedEmail() &&
+             isValidChatRoomId(roomId) &&
+             (
+               roomId.matches('^' + verifiedEmail().replace('[^a-z0-9_]', '_') + '_.+') ||
+               roomId.matches('.+_' + verifiedEmail().replace('[^a-z0-9_]', '_') + '$')
+             );
     }
 
     // --- Entity Validation Blueprints ---
@@ -104,6 +130,75 @@ service cloud.firestore {
     function isValidDirectoryEntry(data) {
       return data.uid is string && data.uid == request.auth.uid && isValidId(data.uid) &&
              data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidSharedMessage(data, chatRoomId) {
+      return data.chatRoomId is string &&
+             data.chatRoomId == chatRoomId &&
+             isValidChatRoomId(chatRoomId) &&
+             data.senderUid is string && isValidId(data.senderUid) &&
+             data.senderEmail is string &&
+             data.senderEmail.size() >= 3 && data.senderEmail.size() <= 120 &&
+             data.senderEmail == data.senderEmail.trim().lower() &&
+             data.senderEmail.matches('^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$') &&
+             data.receiverEmail is string &&
+             data.receiverEmail.size() >= 3 && data.receiverEmail.size() <= 120 &&
+             data.receiverEmail == data.receiverEmail.trim().lower() &&
+             data.receiverEmail.matches('^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$') &&
+             data.participantEmails is list &&
+             data.participantEmails.size() == 2 &&
+             data.participantEmails[0] is string &&
+             data.participantEmails[1] is string &&
+             data.participantEmails[0].size() >= 3 && data.participantEmails[0].size() <= 120 &&
+             data.participantEmails[1].size() >= 3 && data.participantEmails[1].size() <= 120 &&
+             data.participantEmails[0] <= data.participantEmails[1] &&
+             (
+               (data.participantEmails[0] == data.senderEmail && data.participantEmails[1] == data.receiverEmail) ||
+               (data.participantEmails[0] == data.receiverEmail && data.participantEmails[1] == data.senderEmail)
+             ) &&
+             chatRoomId == (data.participantEmails[0] + '_' + data.participantEmails[1]).replace('[^a-z0-9_]', '_') &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 2000 &&
+             data.status is string && data.status in ['SENDING', 'SENT', 'DELIVERED', 'READ'] &&
+             (!('reactions' in data) || data.reactions == null || (data.reactions is map && data.reactions.size() <= 20)) &&
+             data.encrypted is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidCallInvite(data, chatRoomId) {
+      return data.chatRoomId is string &&
+             data.chatRoomId == chatRoomId &&
+             isValidChatRoomId(chatRoomId) &&
+             data.channelName is string &&
+             data.channelName.size() >= 3 && data.channelName.size() <= 64 &&
+             data.channelName.matches('^[a-zA-Z0-9_]+$') &&
+             data.callerUid is string && isValidId(data.callerUid) &&
+             data.caller is string &&
+             data.caller.size() >= 3 && data.caller.size() <= 120 &&
+             data.caller == data.caller.trim().lower() &&
+             data.caller.matches('^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$') &&
+             data.callerName is string &&
+             data.callerName.size() >= 1 && data.callerName.size() <= 60 &&
+             data.callee is string &&
+             data.callee.size() >= 3 && data.callee.size() <= 120 &&
+             data.callee == data.callee.trim().lower() &&
+             data.callee.matches('^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$') &&
+             data.participantEmails is list &&
+             data.participantEmails.size() == 2 &&
+             data.participantEmails[0] is string &&
+             data.participantEmails[1] is string &&
+             data.participantEmails[0].size() >= 3 && data.participantEmails[0].size() <= 120 &&
+             data.participantEmails[1].size() >= 3 && data.participantEmails[1].size() <= 120 &&
+             data.participantEmails[0] <= data.participantEmails[1] &&
+             (
+               (data.participantEmails[0] == data.caller && data.participantEmails[1] == data.callee) ||
+               (data.participantEmails[0] == data.callee && data.participantEmails[1] == data.caller)
+             ) &&
+             chatRoomId == (data.participantEmails[0] + '_' + data.participantEmails[1]).replace('[^a-z0-9_]', '_') &&
+             data.callType is string && data.callType in ['AUDIO', 'VIDEO'] &&
+             data.status is string && data.status in ['calling', 'accepted', 'ended'] &&
              isValidTimestamp(data.createdAt) &&
              isValidTimestamp(data.updatedAt);
     }
@@ -247,6 +342,138 @@ service cloud.firestore {
       allow delete: if isSignedIn() &&
                        isValidEmailHash(emailHash) &&
                        existing().uid == request.auth.uid;
+    }
+
+    match /chats/{chatRoomId}/messages/{messageId} {
+      // Zero-trust two-user shared chat room: verified email membership enforced on every read & write.
+      // Client list queries MUST include .whereArrayContains("participantEmails", verifiedEmail).
+      allow list: if hasVerifiedEmail() &&
+                     isValidChatRoomId(chatRoomId) &&
+                     verifiedEmail() in existing().participantEmails;
+
+      allow get: if hasVerifiedEmail() &&
+                    isValidChatRoomId(chatRoomId) &&
+                    isValidId(messageId) &&
+                    verifiedEmail() in existing().participantEmails;
+
+      allow create: if hasVerifiedEmail() &&
+                       isValidChatRoomId(chatRoomId) &&
+                       isValidId(messageId) &&
+                       incoming().senderUid == request.auth.uid &&
+                       incoming().senderEmail == verifiedEmail() &&
+                       incoming().keys().hasAll([
+                         'chatRoomId', 'senderUid', 'senderEmail', 'receiverEmail',
+                         'participantEmails', 'text', 'status', 'encrypted',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'chatRoomId', 'senderUid', 'senderEmail', 'receiverEmail',
+                         'participantEmails', 'text', 'status', 'reactions',
+                         'encrypted', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidSharedMessage(incoming(), chatRoomId);
+
+      allow update: if hasVerifiedEmail() &&
+                       isValidChatRoomId(chatRoomId) &&
+                       isValidId(messageId) &&
+                       isValidSharedMessage(incoming(), chatRoomId) &&
+                       verifiedEmail() in existing().participantEmails &&
+                       incoming().chatRoomId == existing().chatRoomId &&
+                       incoming().senderUid == existing().senderUid &&
+                       incoming().senderEmail == existing().senderEmail &&
+                       incoming().receiverEmail == existing().receiverEmail &&
+                       incoming().participantEmails == existing().participantEmails &&
+                       incoming().text == existing().text &&
+                       incoming().encrypted == existing().encrypted &&
+                       incoming().createdAt == existing().createdAt && (
+                         // Action 1: Either participant may toggle emoji reactions
+                         incoming().diff(existing()).affectedKeys().hasOnly(['reactions', 'updatedAt']) ||
+                         // Action 2: Recipient may advance delivery/read receipt until terminal READ state
+                         (
+                           existing().status != 'READ' &&
+                           existing().receiverEmail == verifiedEmail() &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+                         )
+                       );
+
+      allow delete: if hasVerifiedEmail() &&
+                       isValidChatRoomId(chatRoomId) &&
+                       isValidId(messageId) &&
+                       existing().senderUid == request.auth.uid &&
+                       verifiedEmail() in existing().participantEmails;
+    }
+
+    match /calls/{chatRoomId} {
+      // Zero-trust peer-to-peer call signaling: verified email participants only.
+      // Client list queries MUST include .whereArrayContains("participantEmails", verifiedEmail).
+      allow list: if hasVerifiedEmail() &&
+                     verifiedEmail() in existing().participantEmails;
+
+      allow get: if isRoomIdParticipant(chatRoomId) &&
+                    (resource == null || verifiedEmail() in existing().participantEmails);
+
+      allow create: if hasVerifiedEmail() &&
+                       isValidChatRoomId(chatRoomId) &&
+                       incoming().callerUid == request.auth.uid &&
+                       incoming().caller == verifiedEmail() &&
+                       incoming().status == 'calling' &&
+                       incoming().keys().hasAll([
+                         'chatRoomId', 'channelName', 'callerUid', 'caller', 'callerName',
+                         'callee', 'participantEmails', 'callType', 'status',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'chatRoomId', 'channelName', 'callerUid', 'caller', 'callerName',
+                         'callee', 'participantEmails', 'callType', 'status',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidCallInvite(incoming(), chatRoomId);
+
+      allow update: if hasVerifiedEmail() &&
+                       isValidChatRoomId(chatRoomId) &&
+                       isValidCallInvite(incoming(), chatRoomId) &&
+                       verifiedEmail() in existing().participantEmails &&
+                       incoming().chatRoomId == existing().chatRoomId &&
+                       incoming().participantEmails == existing().participantEmails &&
+                       incoming().createdAt == existing().createdAt && (
+                         // Action 1: Callee accepts a ringing call
+                         (
+                           existing().status == 'calling' &&
+                           existing().callee == verifiedEmail() &&
+                           incoming().status == 'accepted' &&
+                           incoming().callerUid == existing().callerUid &&
+                           incoming().caller == existing().caller &&
+                           incoming().callee == existing().callee &&
+                           incoming().channelName == existing().channelName &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+                         ) ||
+                         // Action 2: Either participant ends or declines a non-ended call
+                         (
+                           existing().status != 'ended' &&
+                           incoming().status == 'ended' &&
+                           incoming().callerUid == existing().callerUid &&
+                           incoming().caller == existing().caller &&
+                           incoming().callee == existing().callee &&
+                           incoming().channelName == existing().channelName &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+                         ) ||
+                         // Action 3: Either participant starts a new call after the previous call ended
+                         (
+                           existing().status == 'ended' &&
+                           incoming().status == 'calling' &&
+                           incoming().callerUid == request.auth.uid &&
+                           incoming().caller == verifiedEmail() &&
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'channelName', 'callerUid', 'caller', 'callerName',
+                             'callee', 'callType', 'status', 'updatedAt'
+                           ])
+                         )
+                       );
+
+      allow delete: if hasVerifiedEmail() &&
+                       isValidChatRoomId(chatRoomId) &&
+                       verifiedEmail() in existing().participantEmails &&
+                       existing().status == 'ended';
     }
   }
 }

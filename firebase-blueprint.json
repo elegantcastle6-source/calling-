@@ -289,6 +289,144 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "SharedChatMessage": {
+      "title": "SharedChatMessage",
+      "description": "A real-time two-user message stored in a shared room keyed by buildChatRoomId(senderEmail, receiverEmail).",
+      "type": "object",
+      "properties": {
+        "chatRoomId": {
+          "type": "string",
+          "description": "Deterministic sorted sanitized room ID computed from the two participants' lowercase emails."
+        },
+        "senderUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the message sender."
+        },
+        "senderEmail": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified lowercase email address of the message sender."
+        },
+        "receiverEmail": {
+          "type": "string",
+          "format": "email",
+          "description": "Lowercase email address of the message recipient."
+        },
+        "participantEmails": {
+          "type": "array",
+          "description": "Strictly bounded 2-element sorted list of lowercase participant emails for zero-trust participant isolation."
+        },
+        "text": {
+          "type": "string",
+          "description": "Message text content (1..2000 characters)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["SENDING", "SENT", "DELIVERED", "READ"],
+          "description": "Delivery status of the message."
+        },
+        "reactions": {
+          "type": "object",
+          "description": "Optional map of emoji string to reaction count (max 20 entries)."
+        },
+        "encrypted": {
+          "type": "boolean",
+          "description": "Whether the message is marked end-to-end encrypted."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) set on creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) updated on status or reaction change."
+        }
+      },
+      "required": [
+        "chatRoomId",
+        "senderUid",
+        "senderEmail",
+        "receiverEmail",
+        "participantEmails",
+        "text",
+        "status",
+        "encrypted",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CallInvite": {
+      "title": "CallInvite",
+      "description": "Real-time two-user call signaling state for a chat room, coordinating Agora channelName and calling/accepted/ended transitions.",
+      "type": "object",
+      "properties": {
+        "chatRoomId": {
+          "type": "string",
+          "description": "Deterministic sorted sanitized room ID computed from the two participants' lowercase emails."
+        },
+        "channelName": {
+          "type": "string",
+          "description": "Agora RTC channel name (3..64 alphanumeric/underscore characters)."
+        },
+        "callerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the initiating caller."
+        },
+        "caller": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified lowercase email address of the caller."
+        },
+        "callerName": {
+          "type": "string",
+          "description": "Display name of the caller shown on the incoming call screen."
+        },
+        "callee": {
+          "type": "string",
+          "format": "email",
+          "description": "Lowercase email address of the callee."
+        },
+        "participantEmails": {
+          "type": "array",
+          "description": "Strictly bounded 2-element sorted list of lowercase participant emails for zero-trust participant isolation."
+        },
+        "callType": {
+          "type": "string",
+          "enum": ["AUDIO", "VIDEO"],
+          "description": "Whether the call is an audio or video call."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["calling", "accepted", "ended"],
+          "description": "Lifecycle state of the call invite."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) set when the room's call document is first created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) updated on each state transition."
+        }
+      },
+      "required": [
+        "chatRoomId",
+        "channelName",
+        "callerUid",
+        "caller",
+        "callerName",
+        "callee",
+        "participantEmails",
+        "callType",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -300,13 +438,21 @@
       "schema": { "$ref": "#/entities/UserDirectoryEntry" },
       "description": "Hashed exact-match lookup directory allowing signed-in users to find registered users by SHA-256(email) without exposing emails or allowing enumeration."
     },
+    "/chats/{chatRoomId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/SharedChatMessage" },
+      "description": "Shared peer-to-peer chat messages accessible exclusively to the two verified email participants matching chatRoomId."
+    },
+    "/calls/{chatRoomId}": {
+      "schema": { "$ref": "#/entities/CallInvite" },
+      "description": "Shared peer-to-peer call signaling document accessible exclusively to the two verified email participants matching chatRoomId."
+    },
     "/users/{userId}/contacts/{contactId}": {
       "schema": { "$ref": "#/entities/Contact" },
       "description": "Contacts saved by the authenticated user."
     },
     "/users/{userId}/contacts/{contactId}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/Message" },
-      "description": "Text chat messages within a contact conversation."
+      "description": "Legacy user-scoped text chat messages within a contact conversation."
     },
     "/users/{userId}/callLogs/{callLogId}": {
       "schema": { "$ref": "#/entities/CallLog" },

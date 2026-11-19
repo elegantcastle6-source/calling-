@@ -1,12 +1,13 @@
 package com.example.viewmodel
 
 import android.util.Log
-import android.view.SurfaceView
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.AgoraCallController
 import com.example.data.AgoraCallListener
 import com.example.data.AgoraCallStats
+import com.example.data.CallInvite
+import com.example.data.CallSignaling
 import com.example.data.DirectoryUser
 import com.example.data.FirestoreChatRepository
 import com.example.data.UserManager
@@ -17,8 +18,12 @@ import com.example.model.CallLogItem
 import com.example.model.CallStatus
 import com.example.model.CallType
 import com.example.model.ChatMessage
+import com.example.model.MessageStatus
 import com.example.model.User
+import com.example.utils.UserPresenceManager
+import com.example.utils.buildChatRoomId
 import com.google.firebase.auth.FirebaseUser
+import com.justchat.app.sync.JustChatManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -34,6 +39,7 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -58,13 +64,25 @@ sealed interface UserSearchUiState {
 class JustChatViewModel(
     private val repository: FirestoreChatRepository,
     private val userManager: UserManager,
+    private val callSignaling: CallSignaling,
     private val agoraController: AgoraCallController,
     private val currentUserId: String,
     initialUser: FirebaseUser
 ) : ViewModel() {
 
     private val _selectedContact = MutableStateFlow<User?>(null)
-    val selectedContact: StateFlow<User?> = _selectedContact.asStateFlow()
+    private val _livePresenceByEmail = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+
+    val selectedContact: StateFlow<User?> = combine(
+        _selectedContact,
+        _livePresenceByEmail
+    ) { contact, presenceMap ->
+        contact?.withLivePresence(presenceMap)
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+        initialValue = null
+    )
 
     private val _activeCall = MutableStateFlow<ActiveCallState?>(null)
     val activeCall: StateFlow<ActiveCallState?> = _activeCall.asStateFlow()
@@ -78,7 +96,16 @@ class JustChatViewModel(
     private val _isSignedOut = MutableStateFlow(false)
 
     private var callTickerJob: Job? = null
+    private var callSignalingJob: Job? = null
+    private var incomingCallsJob: Job? = null
     private var searchJob: Job? = null
+    private var activeCallRoomId: String? = null
+    private var activeInviteUpdatedAtMs: Long = 0L
+    private val dismissedInviteUpdatedAt = mutableMapOf<String, Long>()
+    private val presenceJobsByEmail = mutableMapOf<String, Job>()
+    private val deliveryJobsByEmail = mutableMapOf<String, Job>()
+    private val acknowledgedDeliveredIds = mutableSetOf<String>()
+    private val acknowledgedReadIds = mutableSetOf<String>()
 
     val fallbackUser: User = User(
         id = currentUserId,
@@ -117,7 +144,14 @@ class JustChatViewModel(
             if (signedOut) {
                 emptyFlow()
             } else {
-                repository.observeContacts(currentUserId)
+                combine(
+                    repository.observeContacts(currentUserId),
+                    _livePresenceByEmail
+                ) { contacts, presenceMap ->
+                    ensurePresenceObservers(contacts)
+                    ensureDeliveryReceiptObservers(contacts)
+                    contacts.map { it.withLivePresence(presenceMap) }
+                }
                     .map<List<User>, UiState<List<User>>> { UiState.Success(it) }
                     .catch { error ->
                         val firestoreError = unwrapFirestoreError(error)
@@ -164,13 +198,20 @@ class JustChatViewModel(
             if (contact == null) {
                 flowOf(UiState.Success(emptyList()))
             } else {
-                repository.observeMessages(currentUserId, contact.id)
+                repository.observeSharedMessages(
+                    currentUserId = currentUserId,
+                    currentUserEmail = currentUserEmail(),
+                    contactEmail = contact.gmail
+                )
+                    .onEach { messages ->
+                        markIncomingMessagesAsRead(contact, messages)
+                    }
                     .map<List<ChatMessage>, UiState<List<ChatMessage>>> { UiState.Success(it) }
                     .catch { error ->
                         val firestoreError = unwrapFirestoreError(error)
                         if (firestoreError == null && error is CancellationException) throw error
                         val rootError = firestoreError ?: error
-                        Log.w(TAG, "Error observing messages", rootError)
+                        Log.w(TAG, "Error observing shared messages", rootError)
                         emit(UiState.Error(rootError.message ?: "Failed to load messages"))
                     }
             }
@@ -182,6 +223,7 @@ class JustChatViewModel(
         )
 
     init {
+        JustChatManager.startPresenceTracking()
         viewModelScope.launch {
             repository.ensureUserProfile(initialUser).onFailure { error ->
                 _actionError.value = error.localizedMessage ?: "Failed to initialize profile."
@@ -191,6 +233,137 @@ class JustChatViewModel(
                 Log.w(TAG, "Directory registration skipped or failed: ${error.message}")
             }
         }
+        startObservingIncomingCalls()
+    }
+
+    private fun startObservingIncomingCalls() {
+        incomingCallsJob?.cancel()
+        incomingCallsJob = viewModelScope.launch {
+            _isSignedOut
+                .flatMapLatest { signedOut ->
+                    if (signedOut) {
+                        emptyFlow()
+                    } else {
+                        callSignaling.observeIncomingCalls(currentUserId, currentUserEmail())
+                    }
+                }
+                .catch { error ->
+                    val firestoreError = unwrapFirestoreError(error)
+                    if (firestoreError == null && error is CancellationException) throw error
+                    Log.w(TAG, "Error observing incoming calls", firestoreError ?: error)
+                }
+                .collect { invites ->
+                    if (_activeCall.value != null) return@collect
+                    val incoming = invites.firstOrNull { invite ->
+                        dismissedInviteUpdatedAt[invite.chatRoomId] != invite.updatedAtMillis
+                    } ?: return@collect
+                    presentIncomingSignaledCall(incoming)
+                }
+        }
+    }
+
+    private fun presentIncomingSignaledCall(invite: CallInvite) {
+        val contacts = (contactsState.value as? UiState.Success)?.data.orEmpty()
+        val callerContact = contacts.firstOrNull {
+            it.gmail.equals(invite.caller, ignoreCase = true)
+        } ?: User(
+            id = invite.callerUid.ifBlank { invite.caller },
+            name = invite.callerName.ifBlank {
+                invite.caller.substringBefore("@").ifBlank { "Caller" }
+            },
+            gmail = invite.caller,
+            avatarColorHex = 0xFF0EA5E9L,
+            statusMessage = "Calling via Just Chat",
+            isOnline = true,
+            lastSeenText = "Active now"
+        )
+
+        val lowDataMode = (profileState.value as? UiState.Success)?.data?.lowDataCallsEnabled ?: true
+        val type = invite.parsedCallType()
+        val callId = UUID.randomUUID().toString()
+        val agoraConfigured = agoraController.isConfigured
+
+        activeCallRoomId = invite.chatRoomId
+        activeInviteUpdatedAtMs = invite.updatedAtMillis
+
+        _activeCall.value = ActiveCallState(
+            callId = callId,
+            contact = callerContact,
+            callType = type,
+            status = CallStatus.INCOMING_RINGING,
+            isMuted = false,
+            isCameraOn = type == CallType.VIDEO,
+            isFrontCamera = true,
+            isSpeakerOn = true,
+            isLowDataMode = lowDataMode,
+            durationSeconds = 0,
+            latencyMs = 0,
+            dataRateKbps = 0,
+            totalDataKb = 0L,
+            channelName = invite.channelName,
+            remoteUid = null,
+            isAgoraConfigured = agoraConfigured,
+            connectionNote = if (agoraConfigured) null else MISSING_AGORA_NOTE
+        )
+
+        callSignalingJob?.cancel()
+        callSignalingJob = viewModelScope.launch {
+            collectCallSignaling(
+                callId = callId,
+                chatRoomId = invite.chatRoomId,
+                contactName = callerContact.name,
+                isCaller = false
+            )
+        }
+    }
+
+    private suspend fun collectCallSignaling(
+        callId: String,
+        chatRoomId: String,
+        contactName: String,
+        isCaller: Boolean
+    ) {
+        callSignaling.observeCall(currentUserId, chatRoomId)
+            .catch { error ->
+                val firestoreError = unwrapFirestoreError(error)
+                if (firestoreError == null && error is CancellationException) throw error
+                Log.w(TAG, "Error observing call room $chatRoomId", firestoreError ?: error)
+            }
+            .collect { invite ->
+                val current = _activeCall.value
+                if (current == null || current.callId != callId) return@collect
+                if (invite == null) return@collect
+
+                activeInviteUpdatedAtMs = invite.updatedAtMillis
+                when (invite.status) {
+                    CallInvite.STATUS_ACCEPTED -> {
+                        _activeCall.update { call ->
+                            if (call == null || call.callId != callId) return@update call
+                            val nextNote = when {
+                                call.remoteUid != null -> null
+                                !call.isAgoraConfigured -> MISSING_AGORA_NOTE
+                                isCaller -> "$contactName accepted • Connecting audio…"
+                                else -> "Connected • Waiting for $contactName audio…"
+                            }
+                            call.copy(
+                                status = CallStatus.CONNECTED,
+                                connectionNote = nextNote
+                            )
+                        }
+                        if (callTickerJob == null || callTickerJob?.isActive != true) {
+                            startCallDurationTicker(callId)
+                        }
+                    }
+
+                    CallInvite.STATUS_ENDED -> {
+                        dismissedInviteUpdatedAt[chatRoomId] = invite.updatedAtMillis
+                        endCall(
+                            persistLog = current.status == CallStatus.CONNECTED,
+                            notifySignaling = false
+                        )
+                    }
+                }
+            }
     }
 
     fun selectContact(contact: User?) {
@@ -199,6 +372,10 @@ class JustChatViewModel(
 
     fun clearActionError() {
         _actionError.value = null
+    }
+
+    fun reportActionError(message: String) {
+        _actionError.value = message
     }
 
     fun searchUserByEmail(email: String) {
@@ -233,10 +410,103 @@ class JustChatViewModel(
 
     fun prepareForSignOut() {
         _isSignedOut.value = true
+        incomingCallsJob?.cancel()
+        callSignalingJob?.cancel()
+        cancelPresenceObservers()
+        cancelDeliveryReceiptObservers()
+        acknowledgedDeliveredIds.clear()
+        acknowledgedReadIds.clear()
+        JustChatManager.stopPresenceTracking()
         searchJob?.cancel()
         _userSearchState.value = UserSearchUiState.Idle
-        endCall(persistLog = false)
+        endCall(persistLog = false, notifySignaling = false)
         _selectedContact.value = null
+    }
+
+    private fun ensurePresenceObservers(contacts: List<User>) {
+        if (_isSignedOut.value) return
+        val activeEmails = contacts
+            .map { it.gmail.trim().lowercase() }
+            .filter { it.contains("@") }
+            .toSet()
+
+        // Detach observers for removed contacts
+        val staleEmails = presenceJobsByEmail.keys - activeEmails
+        staleEmails.forEach { email ->
+            presenceJobsByEmail.remove(email)?.cancel()
+        }
+
+        // Attach live RTDB presence observers for newly added contacts
+        activeEmails.forEach { email ->
+            if (presenceJobsByEmail.containsKey(email)) return@forEach
+            presenceJobsByEmail[email] = viewModelScope.launch {
+                val directoryUser = userManager.searchUserByEmail(email).getOrNull() ?: return@launch
+                UserPresenceManager.observeUserOnlineStatus(directoryUser.uid)
+                    .catch { error ->
+                        if (error is CancellationException) throw error
+                        Log.w(TAG, "Live presence stream failed for $email", error)
+                    }
+                    .collect { isOnline ->
+                        _livePresenceByEmail.update { current ->
+                            if (current[email] == isOnline) current else current + (email to isOnline)
+                        }
+                    }
+            }
+        }
+    }
+
+    private fun cancelPresenceObservers() {
+        presenceJobsByEmail.values.forEach { it.cancel() }
+        presenceJobsByEmail.clear()
+        _livePresenceByEmail.value = emptyMap()
+    }
+
+    private fun ensureDeliveryReceiptObservers(contacts: List<User>) {
+        if (_isSignedOut.value) return
+        val contactsByEmail = contacts
+            .associateBy { it.gmail.trim().lowercase() }
+            .filterKeys { it.contains("@") }
+
+        val staleEmails = deliveryJobsByEmail.keys - contactsByEmail.keys
+        staleEmails.forEach { email ->
+            deliveryJobsByEmail.remove(email)?.cancel()
+        }
+
+        contactsByEmail.forEach { (email, contact) ->
+            if (deliveryJobsByEmail.containsKey(email)) return@forEach
+            deliveryJobsByEmail[email] = viewModelScope.launch {
+                repository.observeSharedMessages(
+                    currentUserId = currentUserId,
+                    currentUserEmail = currentUserEmail(),
+                    contactEmail = email
+                )
+                    .catch { error ->
+                        if (error is CancellationException) throw error
+                        Log.w(TAG, "Delivery receipt stream failed for $email", error)
+                    }
+                    .collect { messages ->
+                        val isChatOpen = _selectedContact.value?.gmail
+                            ?.trim()
+                            ?.equals(email, ignoreCase = true) == true
+                        if (!isChatOpen) {
+                            markIncomingMessagesAsDelivered(contact, messages)
+                        }
+                    }
+            }
+        }
+    }
+
+    private fun cancelDeliveryReceiptObservers() {
+        deliveryJobsByEmail.values.forEach { it.cancel() }
+        deliveryJobsByEmail.clear()
+    }
+
+    private fun User.withLivePresence(presenceMap: Map<String, Boolean>): User {
+        val liveOnline = presenceMap[gmail.trim().lowercase()] ?: return this
+        return copy(
+            isOnline = liveOnline,
+            lastSeenText = if (liveOnline) "Active now" else "Offline"
+        )
     }
 
     fun addContactByGmail(gmail: String, name: String?, onAdded: (User) -> Unit) {
@@ -250,21 +520,85 @@ class JustChatViewModel(
         }
     }
 
-    fun sendMessage(contactId: String, text: String) {
+    fun sendMessage(contact: User, text: String) {
         viewModelScope.launch {
-            repository.sendMessage(currentUserId, contactId, text)
-                .onFailure { error ->
-                    _actionError.value = error.localizedMessage ?: "Unable to send message."
-                }
+            repository.sendSharedMessage(
+                currentUserId = currentUserId,
+                senderEmail = currentUserEmail(),
+                receiverEmail = contact.gmail,
+                text = text
+            ).onFailure { error ->
+                _actionError.value = error.localizedMessage ?: "Unable to send message."
+            }
         }
     }
 
-    fun toggleReaction(contactId: String, message: ChatMessage, emoji: String) {
+    fun toggleReaction(contact: User, message: ChatMessage, emoji: String) {
         viewModelScope.launch {
-            repository.toggleReaction(currentUserId, contactId, message, emoji)
-                .onFailure { error ->
-                    _actionError.value = error.localizedMessage ?: "Unable to update reaction."
-                }
+            repository.toggleSharedReaction(
+                currentUserId = currentUserId,
+                currentUserEmail = currentUserEmail(),
+                contactEmail = contact.gmail,
+                message = message,
+                emoji = emoji
+            ).onFailure { error ->
+                _actionError.value = error.localizedMessage ?: "Unable to update reaction."
+            }
+        }
+    }
+
+    fun markIncomingMessagesAsDelivered(contact: User, messages: List<ChatMessage>) {
+        if (_isSignedOut.value) return
+        val undeliveredIds = messages
+            .filter {
+                it.senderId != "current_user" &&
+                    it.status == MessageStatus.SENT &&
+                    it.id.isNotBlank() &&
+                    it.id !in acknowledgedDeliveredIds &&
+                    it.id !in acknowledgedReadIds
+            }
+            .map { it.id }
+        if (undeliveredIds.isEmpty()) return
+
+        acknowledgedDeliveredIds.addAll(undeliveredIds)
+        viewModelScope.launch {
+            repository.markSharedMessagesStatus(
+                currentUserId = currentUserId,
+                currentUserEmail = currentUserEmail(),
+                contactEmail = contact.gmail,
+                messageIds = undeliveredIds,
+                targetStatus = MessageStatus.DELIVERED
+            ).onFailure { error ->
+                acknowledgedDeliveredIds.removeAll(undeliveredIds.toSet())
+                Log.w(TAG, "Unable to mark messages as delivered: ${error.message}")
+            }
+        }
+    }
+
+    private fun markIncomingMessagesAsRead(contact: User, messages: List<ChatMessage>) {
+        if (_isSignedOut.value) return
+        val unreadIds = messages
+            .filter {
+                it.senderId != "current_user" &&
+                    it.status != MessageStatus.READ &&
+                    it.id.isNotBlank() &&
+                    it.id !in acknowledgedReadIds
+            }
+            .map { it.id }
+        if (unreadIds.isEmpty()) return
+
+        acknowledgedReadIds.addAll(unreadIds)
+        viewModelScope.launch {
+            repository.markSharedMessagesStatus(
+                currentUserId = currentUserId,
+                currentUserEmail = currentUserEmail(),
+                contactEmail = contact.gmail,
+                messageIds = unreadIds,
+                targetStatus = MessageStatus.READ
+            ).onFailure { error ->
+                acknowledgedReadIds.removeAll(unreadIds.toSet())
+                Log.w(TAG, "Unable to mark messages as read: ${error.message}")
+            }
         }
     }
 
@@ -286,7 +620,7 @@ class JustChatViewModel(
         }
     }
 
-    // --- Active Call State Management (Agora RTC) ---
+    // --- Active Call State Management (Firestore CallSignaling + Agora RTC) ---
 
     private fun currentUserEmail(): String {
         return (profileState.value as? UiState.Success)?.data?.email
@@ -294,14 +628,27 @@ class JustChatViewModel(
             ?: fallbackUser.gmail
     }
 
+    private fun currentUserDisplayName(): String {
+        return (profileState.value as? UiState.Success)?.data?.displayName
+            ?.takeIf { it.isNotBlank() }
+            ?: fallbackUser.name
+    }
+
     fun startCall(contact: User, type: CallType) {
         callTickerJob?.cancel()
+        callSignalingJob?.cancel()
         agoraController.leaveCall()
 
         val lowDataMode = (profileState.value as? UiState.Success)?.data?.lowDataCallsEnabled ?: true
-        val channelName = AgoraCallController.buildChannelName(currentUserEmail(), contact.gmail)
+        val myEmail = currentUserEmail()
+        val myName = currentUserDisplayName()
+        val chatRoomId = buildChatRoomId(myEmail, contact.gmail)
+        val channelName = CallSignaling.buildCallChannelName(chatRoomId, myEmail, contact.gmail)
         val agoraConfigured = agoraController.isConfigured
         val callId = UUID.randomUUID().toString()
+
+        activeCallRoomId = chatRoomId
+        activeInviteUpdatedAtMs = 0L
 
         val initialCall = ActiveCallState(
             callId = callId,
@@ -311,7 +658,7 @@ class JustChatViewModel(
             isMuted = false,
             isCameraOn = type == CallType.VIDEO,
             isFrontCamera = true,
-            isSpeakerOn = type == CallType.VIDEO,
+            isSpeakerOn = true,
             isLowDataMode = lowDataMode,
             durationSeconds = 0,
             latencyMs = 0,
@@ -321,17 +668,45 @@ class JustChatViewModel(
             remoteUid = null,
             isAgoraConfigured = agoraConfigured,
             connectionNote = if (agoraConfigured) {
-                "Connecting via Agora RTC…"
+                "Ringing ${contact.name}…"
             } else {
                 MISSING_AGORA_NOTE
             }
         )
         _activeCall.value = initialCall
 
+        // Publish real-time Firestore call invite at /calls/{chatRoomId} and observe callee state
+        callSignalingJob = viewModelScope.launch {
+            val inviteResult = callSignaling.startCall(
+                currentUserId = currentUserId,
+                caller = myEmail,
+                callerName = myName,
+                callee = contact.gmail,
+                callType = type
+            )
+            inviteResult.onSuccess { invite ->
+                if (_activeCall.value?.callId == callId) {
+                    activeInviteUpdatedAtMs = invite.updatedAtMillis
+                    collectCallSignaling(
+                        callId = callId,
+                        chatRoomId = invite.chatRoomId,
+                        contactName = contact.name,
+                        isCaller = true
+                    )
+                }
+            }.onFailure { error ->
+                Log.w(TAG, "Call signaling failed: ${error.message}")
+                _activeCall.update { call ->
+                    if (call == null || call.callId != callId) return@update call
+                    call.copy(connectionNote = error.localizedMessage ?: "Unable to signal callee.")
+                }
+            }
+        }
+
         if (agoraConfigured) {
             agoraController.joinCall(
                 channelName = channelName,
-                isVideo = type == CallType.VIDEO,
+                isSpeakerDefault = true,
                 isLowDataMode = lowDataMode,
                 listener = createAgoraListener(callId = callId, contactName = contact.name)
             )
@@ -340,10 +715,15 @@ class JustChatViewModel(
 
     fun receiveIncomingCall(contact: User, type: CallType) {
         callTickerJob?.cancel()
+        callSignalingJob?.cancel()
         agoraController.leaveCall()
+        activeCallRoomId = null
+        activeInviteUpdatedAtMs = 0L
 
         val lowDataMode = (profileState.value as? UiState.Success)?.data?.lowDataCallsEnabled ?: true
-        val channelName = AgoraCallController.buildChannelName(currentUserEmail(), contact.gmail)
+        val myEmail = currentUserEmail()
+        val chatRoomId = buildChatRoomId(myEmail, contact.gmail)
+        val channelName = CallSignaling.buildCallChannelName(chatRoomId, myEmail, contact.gmail)
         val agoraConfigured = agoraController.isConfigured
 
         _activeCall.value = ActiveCallState(
@@ -354,7 +734,7 @@ class JustChatViewModel(
             isMuted = false,
             isCameraOn = type == CallType.VIDEO,
             isFrontCamera = true,
-            isSpeakerOn = type == CallType.VIDEO,
+            isSpeakerOn = true,
             isLowDataMode = lowDataMode,
             durationSeconds = 0,
             latencyMs = 0,
@@ -371,6 +751,21 @@ class JustChatViewModel(
         val current = _activeCall.value ?: return
         if (current.status != CallStatus.INCOMING_RINGING) return
 
+        val roomId = activeCallRoomId
+        if (roomId != null) {
+            viewModelScope.launch {
+                callSignaling.acceptCall(currentUserId, roomId).onFailure { error ->
+                    Log.w(TAG, "Failed to update call invite to accepted: ${error.message}")
+                }
+            }
+        }
+
+        val resolvedChannel = current.channelName.ifBlank {
+            val myEmail = currentUserEmail()
+            val fallbackRoomId = buildChatRoomId(myEmail, current.contact.gmail)
+            CallSignaling.buildCallChannelName(fallbackRoomId, myEmail, current.contact.gmail)
+        }
+
         if (agoraController.isConfigured) {
             _activeCall.update {
                 it?.copy(
@@ -380,21 +775,20 @@ class JustChatViewModel(
                 )
             }
             agoraController.joinCall(
-                channelName = current.channelName.ifBlank {
-                    AgoraCallController.buildChannelName(currentUserEmail(), current.contact.gmail)
-                },
-                isVideo = current.callType == CallType.VIDEO,
+                channelName = resolvedChannel,
+                isSpeakerDefault = current.isSpeakerOn,
                 isLowDataMode = current.isLowDataMode,
                 listener = createAgoraListener(callId = current.callId, contactName = current.contact.name)
             )
         } else {
             _activeCall.update {
                 it?.copy(
-                    status = CallStatus.DIALING,
+                    status = CallStatus.CONNECTED,
                     isAgoraConfigured = false,
                     connectionNote = MISSING_AGORA_NOTE
                 )
             }
+            startCallDurationTicker(current.callId)
         }
     }
 
@@ -408,19 +802,11 @@ class JustChatViewModel(
 
     fun toggleCamera() {
         val current = _activeCall.value ?: return
-        val nextCameraOn = !current.isCameraOn
-        _activeCall.update { it?.copy(isCameraOn = nextCameraOn) }
-        if (current.isAgoraConfigured) {
-            agoraController.setCameraEnabled(nextCameraOn, current.isLowDataMode)
-        }
+        _activeCall.update { it?.copy(isCameraOn = !current.isCameraOn) }
     }
 
     fun toggleCameraFacing() {
-        val current = _activeCall.value ?: return
         _activeCall.update { it?.copy(isFrontCamera = !it.isFrontCamera) }
-        if (current.isAgoraConfigured) {
-            agoraController.switchCamera()
-        }
     }
 
     fun toggleSpeaker() {
@@ -432,31 +818,35 @@ class JustChatViewModel(
         }
     }
 
-    fun attachLocalVideo(surfaceView: SurfaceView) {
-        agoraController.attachLocalVideo(surfaceView)
-    }
-
-    fun detachLocalVideo() {
-        agoraController.detachLocalVideo()
-    }
-
-    fun attachRemoteVideo(uid: Int, surfaceView: SurfaceView) {
-        agoraController.attachRemoteVideo(uid, surfaceView)
-    }
-
-    fun detachRemoteVideo(uid: Int) {
-        agoraController.detachRemoteVideo(uid)
-    }
-
     fun setMinimized(minimized: Boolean) {
         _activeCall.update { it?.copy(isMinimized = minimized) }
     }
 
-    fun endCall(persistLog: Boolean = true) {
+    fun endCall(persistLog: Boolean = true, notifySignaling: Boolean = true) {
         callTickerJob?.cancel()
+        callSignalingJob?.cancel()
         agoraController.leaveCall()
+
         val finishedCall = _activeCall.value
+        val roomId = activeCallRoomId
+        val inviteTimestamp = activeInviteUpdatedAtMs
+
+        activeCallRoomId = null
+        activeInviteUpdatedAtMs = 0L
         _activeCall.value = null
+
+        if (roomId != null && inviteTimestamp > 0L) {
+            dismissedInviteUpdatedAt[roomId] = inviteTimestamp
+        }
+
+        if (notifySignaling && roomId != null && !_isSignedOut.value) {
+            viewModelScope.launch {
+                callSignaling.endCall(currentUserId, roomId).onFailure { error ->
+                    Log.w(TAG, "Failed to signal call end: ${error.message}")
+                }
+            }
+        }
+
         if (persistLog && finishedCall != null) {
             val currentSaved = (profileState.value as? UiState.Success)?.data?.totalDataSavedMb ?: 0.0
             viewModelScope.launch {
@@ -559,6 +949,10 @@ class JustChatViewModel(
     override fun onCleared() {
         super.onCleared()
         callTickerJob?.cancel()
+        callSignalingJob?.cancel()
+        incomingCallsJob?.cancel()
+        cancelPresenceObservers()
+        JustChatManager.stopPresenceTracking()
         agoraController.destroy()
     }
 

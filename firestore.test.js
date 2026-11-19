@@ -553,3 +553,424 @@ test("UserDirectory: verified owner registers hash, peers lookup by exact hash, 
     })
   );
 });
+
+// --- 7. SHARED TWO-USER CHAT ROOMS (/chats/{chatRoomId}/messages/{messageId}) ---
+
+function buildChatRoomId(userA, userB) {
+  return [userA.trim().toLowerCase(), userB.trim().toLowerCase()]
+    .sort()
+    .join("_")
+    .replace(/[^a-zA-Z0-9_]/g, "_");
+}
+
+function validSharedMessagePayload(senderUid, senderEmail, receiverEmail, text, ts = pastTimestamp()) {
+  const normSender = senderEmail.trim().toLowerCase();
+  const normReceiver = receiverEmail.trim().toLowerCase();
+  const roomId = buildChatRoomId(normSender, normReceiver);
+  return {
+    chatRoomId: roomId,
+    senderUid,
+    senderEmail: normSender,
+    receiverEmail: normReceiver,
+    participantEmails: [normSender, normReceiver].sort(),
+    text,
+    status: "SENT",
+    encrypted: true,
+    createdAt: ts,
+    updatedAt: ts,
+  };
+}
+
+test("SharedChats: two-user real-time messaging succeeds; non-participants, spoofing, room squatting & unfiltered list fail", async () => {
+  const CHARLIE_UID = "charlie_uid_789";
+  const aliceEmail = "alice@gmail.com";
+  const bobEmail = "bob@gmail.com";
+  const charlieEmail = "charlie@gmail.com";
+  const roomId = buildChatRoomId(aliceEmail, bobEmail);
+
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const aliceDb = testEnv
+    .authenticatedContext(ALICE_UID, { email: aliceEmail, email_verified: true })
+    .firestore();
+  const unverifiedAliceDb = testEnv
+    .authenticatedContext(ALICE_UID, { email: aliceEmail, email_verified: false })
+    .firestore();
+  const bobDb = testEnv
+    .authenticatedContext(BOB_UID, { email: bobEmail, email_verified: true })
+    .firestore();
+  const charlieDb = testEnv
+    .authenticatedContext(CHARLIE_UID, { email: charlieEmail, email_verified: true })
+    .firestore();
+
+  const roomMessages = (db) => db.collection("chats").doc(roomId).collection("messages");
+
+  // 1. Unauthenticated & unverified users are strictly denied
+  await assertFails(
+    roomMessages(unauthDb).where("participantEmails", "array-contains", aliceEmail).get()
+  );
+  await assertFails(
+    roomMessages(unauthDb)
+      .doc("msg_unauth")
+      .set(validSharedMessagePayload(ALICE_UID, aliceEmail, bobEmail, "Unauthorized"))
+  );
+  await assertFails(
+    roomMessages(unverifiedAliceDb)
+      .doc("msg_unverified")
+      .set(validSharedMessagePayload(ALICE_UID, aliceEmail, bobEmail, "Unverified"))
+  );
+
+  // 2. Empty room filtered query succeeds for participant; unfiltered list fails (Query Enforcer)
+  await assertSucceeds(
+    roomMessages(aliceDb).where("participantEmails", "array-contains", aliceEmail).get()
+  );
+  await assertFails(roomMessages(aliceDb).get());
+  await assertFails(roomMessages(charlieDb).get());
+
+  // 3. Alice sends message to Bob in shared room
+  await assertSucceeds(
+    roomMessages(aliceDb)
+      .doc("msg_alice_1")
+      .set(validSharedMessagePayload(ALICE_UID, aliceEmail, bobEmail, "Hey Bob!"))
+  );
+
+  // 4. Bob lists & reads Alice's message using Kotlin-mirrored array-contains query
+  const bobSnapshot = await assertSucceeds(
+    roomMessages(bobDb).where("participantEmails", "array-contains", bobEmail).get()
+  );
+  if (bobSnapshot.size !== 1) {
+    throw new Error(`Expected Bob to see 1 message, got ${bobSnapshot.size}`);
+  }
+  await assertSucceeds(roomMessages(bobDb).doc("msg_alice_1").get());
+
+  // 5. Bob replies in the exact same room; Alice sees both messages
+  await assertSucceeds(
+    roomMessages(bobDb)
+      .doc("msg_bob_1")
+      .set(validSharedMessagePayload(BOB_UID, bobEmail, aliceEmail, "Hi Alice!"))
+  );
+  const aliceSnapshot = await assertSucceeds(
+    roomMessages(aliceDb).where("participantEmails", "array-contains", aliceEmail).get()
+  );
+  if (aliceSnapshot.size !== 2) {
+    throw new Error(`Expected Alice to see 2 messages, got ${aliceSnapshot.size}`);
+  }
+
+  // 6. Both participants may update reactions; receiver may mark READ (terminal lock afterward)
+  await assertSucceeds(
+    roomMessages(bobDb).doc("msg_alice_1").update({
+      reactions: { "👍": 1 },
+      updatedAt: pastTimestamp(1500),
+    })
+  );
+  await assertSucceeds(
+    roomMessages(bobDb).doc("msg_alice_1").update({
+      status: "READ",
+      updatedAt: pastTimestamp(1000),
+    })
+  );
+  // Terminal state lock: once READ, status cannot be changed again
+  await assertFails(
+    roomMessages(bobDb).doc("msg_alice_1").update({
+      status: "DELIVERED",
+      updatedAt: pastTimestamp(500),
+    })
+  );
+  // Sender cannot change own message's status (receiver-only action)
+  await assertFails(
+    roomMessages(aliceDb).doc("msg_alice_1").update({
+      status: "DELIVERED",
+      updatedAt: pastTimestamp(500),
+    })
+  );
+
+  // 7. Reject immutable field mutation (text, senderEmail, participantEmails, createdAt) & ghost keys
+  await assertFails(
+    roomMessages(aliceDb).doc("msg_alice_1").update({
+      text: "Edited message",
+      updatedAt: pastTimestamp(500),
+    })
+  );
+  await assertFails(
+    roomMessages(aliceDb).doc("msg_alice_1").update({
+      createdAt: pastTimestamp(500),
+      updatedAt: pastTimestamp(500),
+    })
+  );
+  await assertFails(
+    roomMessages(aliceDb).doc("msg_alice_1").update({
+      isAdmin: true,
+      updatedAt: pastTimestamp(500),
+    })
+  );
+
+  // 8. Non-participant Charlie cannot read, list, update, delete, or inject/squat in Alice+Bob's room
+  await assertFails(roomMessages(charlieDb).doc("msg_alice_1").get());
+  await assertFails(
+    roomMessages(charlieDb).where("participantEmails", "array-contains", aliceEmail).get()
+  );
+  await assertFails(
+    roomMessages(charlieDb).doc("msg_alice_1").update({
+      reactions: { "🔥": 1 },
+      updatedAt: pastTimestamp(500),
+    })
+  );
+  await assertFails(roomMessages(charlieDb).doc("msg_alice_1").delete());
+  // Room-ID parity blocks Charlie from injecting a Charlie+Alice payload into Alice+Bob's roomId
+  await assertFails(
+    roomMessages(charlieDb)
+      .doc("msg_charlie_squat")
+      .set({
+        ...validSharedMessagePayload(CHARLIE_UID, charlieEmail, aliceEmail, "Room squat"),
+        chatRoomId: roomId,
+      })
+  );
+
+  // 9. Reject spoofing senderUid, spoofing senderEmail, redundant `id` key, oversized text, and future timestamps
+  await assertFails(
+    roomMessages(bobDb)
+      .doc("msg_spoof_uid")
+      .set(validSharedMessagePayload(ALICE_UID, bobEmail, aliceEmail, "Wrong UID"))
+  );
+  await assertFails(
+    roomMessages(bobDb)
+      .doc("msg_spoof_email")
+      .set(validSharedMessagePayload(BOB_UID, aliceEmail, bobEmail, "Wrong email"))
+  );
+  await assertFails(
+    roomMessages(aliceDb)
+      .doc("msg_extra_id")
+      .set({
+        id: "msg_extra_id",
+        ...validSharedMessagePayload(ALICE_UID, aliceEmail, bobEmail, "Extra id"),
+      })
+  );
+  await assertFails(
+    roomMessages(aliceDb)
+      .doc("msg_oversized")
+      .set(validSharedMessagePayload(ALICE_UID, aliceEmail, bobEmail, "x".repeat(2001)))
+  );
+  await assertFails(
+    roomMessages(aliceDb)
+      .doc("msg_future_ts")
+      .set(
+        validSharedMessagePayload(
+          ALICE_UID,
+          aliceEmail,
+          bobEmail,
+          "Future",
+          new Date(Date.now() + 60000)
+        )
+      )
+  );
+
+  // 10. Delete: recipient cannot delete sender's message; sender can delete own message
+  await assertFails(roomMessages(bobDb).doc("msg_alice_1").delete());
+  await assertSucceeds(roomMessages(aliceDb).doc("msg_alice_1").delete());
+});
+
+// --- 8. SHARED TWO-USER CALL SIGNALING (/calls/{chatRoomId}) ---
+
+function validCallInvitePayload(
+  callerUid,
+  callerEmail,
+  callerName,
+  calleeEmail,
+  status = "calling",
+  ts = pastTimestamp()
+) {
+  const normCaller = callerEmail.trim().toLowerCase();
+  const normCallee = calleeEmail.trim().toLowerCase();
+  const roomId = buildChatRoomId(normCaller, normCallee);
+  const channelName = `call_${roomId}`.slice(0, 64);
+  return {
+    chatRoomId: roomId,
+    channelName,
+    callerUid,
+    caller: normCaller,
+    callerName,
+    callee: normCallee,
+    participantEmails: [normCaller, normCallee].sort(),
+    callType: "AUDIO",
+    status,
+    createdAt: ts,
+    updatedAt: ts,
+  };
+}
+
+test("CallSignaling: full calling -> accepted -> ended -> re-call lifecycle succeeds; unauthorized access & state shortcutting fail", async () => {
+  const CHARLIE_UID = "charlie_uid_789";
+  const aliceEmail = "alice@gmail.com";
+  const bobEmail = "bob@gmail.com";
+  const charlieEmail = "charlie@gmail.com";
+  const roomId = buildChatRoomId(aliceEmail, bobEmail);
+
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const aliceDb = testEnv
+    .authenticatedContext(ALICE_UID, { email: aliceEmail, email_verified: true })
+    .firestore();
+  const unverifiedAliceDb = testEnv
+    .authenticatedContext(ALICE_UID, { email: aliceEmail, email_verified: false })
+    .firestore();
+  const bobDb = testEnv
+    .authenticatedContext(BOB_UID, { email: bobEmail, email_verified: true })
+    .firestore();
+  const charlieDb = testEnv
+    .authenticatedContext(CHARLIE_UID, { email: charlieEmail, email_verified: true })
+    .firestore();
+
+  const callDoc = (db) => db.collection("calls").doc(roomId);
+
+  // 1. Unauthenticated & unverified users denied
+  await assertFails(callDoc(unauthDb).get());
+  await assertFails(
+    callDoc(unauthDb).set(validCallInvitePayload(ALICE_UID, aliceEmail, "Alice", bobEmail))
+  );
+  await assertFails(
+    callDoc(unverifiedAliceDb).set(validCallInvitePayload(ALICE_UID, aliceEmail, "Alice", bobEmail))
+  );
+
+  // 2. Non-existent room get succeeds for participants, fails for non-participant Charlie
+  await assertSucceeds(callDoc(aliceDb).get());
+  await assertSucceeds(callDoc(bobDb).get());
+  await assertFails(callDoc(charlieDb).get());
+
+  // 3. Incoming call list query alignment: filtered array-contains succeeds, unfiltered list fails
+  await assertSucceeds(
+    bobDb.collection("calls").where("participantEmails", "array-contains", bobEmail).get()
+  );
+  await assertFails(bobDb.collection("calls").get());
+  await assertFails(charlieDb.collection("calls").get());
+
+  // 4. Reject creating a call directly in "accepted" or "ended" state (State Shortcutting)
+  await assertFails(
+    callDoc(aliceDb).set(
+      validCallInvitePayload(ALICE_UID, aliceEmail, "Alice", bobEmail, "accepted")
+    )
+  );
+  // Reject spoofing callerUid or caller email or redundant `id` key
+  await assertFails(
+    callDoc(aliceDb).set(validCallInvitePayload(BOB_UID, aliceEmail, "Alice", bobEmail))
+  );
+  await assertFails(
+    callDoc(charlieDb).set({
+      ...validCallInvitePayload(CHARLIE_UID, charlieEmail, "Charlie", aliceEmail),
+      chatRoomId: roomId,
+    })
+  );
+  await assertFails(
+    callDoc(aliceDb).set({
+      id: roomId,
+      ...validCallInvitePayload(ALICE_UID, aliceEmail, "Alice", bobEmail),
+    })
+  );
+
+  // 5. Alice starts a call to Bob -> succeeds
+  await assertSucceeds(
+    callDoc(aliceDb).set(validCallInvitePayload(ALICE_UID, aliceEmail, "Alice", bobEmail))
+  );
+
+  // 6. Bob sees the incoming call via filtered query and direct get; Charlie is denied both
+  const bobIncoming = await assertSucceeds(
+    bobDb.collection("calls").where("participantEmails", "array-contains", bobEmail).get()
+  );
+  if (bobIncoming.size !== 1) {
+    throw new Error(`Expected Bob to observe 1 active call invite, got ${bobIncoming.size}`);
+  }
+  await assertSucceeds(callDoc(bobDb).get());
+  await assertFails(callDoc(charlieDb).get());
+  await assertFails(
+    charlieDb.collection("calls").where("participantEmails", "array-contains", aliceEmail).get()
+  );
+
+  // 7. Caller Alice cannot self-accept; Callee Bob accepts -> succeeds
+  await assertFails(
+    callDoc(aliceDb).update({
+      status: "accepted",
+      updatedAt: pastTimestamp(2000),
+    })
+  );
+  await assertSucceeds(
+    callDoc(bobDb).update({
+      status: "accepted",
+      updatedAt: pastTimestamp(1800),
+    })
+  );
+
+  // 8. Cannot delete active call; cannot tamper with channelName or ghost field
+  await assertFails(callDoc(aliceDb).delete());
+  await assertFails(
+    callDoc(bobDb).update({
+      channelName: "call_hijacked",
+      updatedAt: pastTimestamp(1500),
+    })
+  );
+  await assertFails(
+    callDoc(bobDb).update({
+      isAdmin: true,
+      updatedAt: pastTimestamp(1500),
+    })
+  );
+
+  // 9. Charlie cannot end Alice+Bob's call; Alice ends the call -> succeeds
+  await assertFails(
+    callDoc(charlieDb).update({
+      status: "ended",
+      updatedAt: pastTimestamp(1200),
+    })
+  );
+  await assertSucceeds(
+    callDoc(aliceDb).update({
+      status: "ended",
+      updatedAt: pastTimestamp(1000),
+    })
+  );
+
+  // 10. Ended call cannot jump straight to "accepted" (Terminal State Lock)
+  await assertFails(
+    callDoc(bobDb).update({
+      status: "accepted",
+      updatedAt: pastTimestamp(800),
+    })
+  );
+
+  // 11. Re-call: Bob calls Alice back in the same room (preserving createdAt!) -> succeeds
+  await assertSucceeds(
+    callDoc(bobDb).update({
+      channelName: `call_${roomId}`,
+      callerUid: BOB_UID,
+      caller: bobEmail,
+      callerName: "Bob",
+      callee: aliceEmail,
+      callType: "AUDIO",
+      status: "calling",
+      updatedAt: pastTimestamp(600),
+    })
+  );
+
+  // Reject mutating createdAt during re-call
+  await assertSucceeds(
+    callDoc(aliceDb).update({
+      status: "ended",
+      updatedAt: pastTimestamp(400),
+    })
+  );
+  await assertFails(
+    callDoc(bobDb).update({
+      channelName: `call_${roomId}`,
+      callerUid: BOB_UID,
+      caller: bobEmail,
+      callerName: "Bob",
+      callee: aliceEmail,
+      callType: "AUDIO",
+      status: "calling",
+      createdAt: pastTimestamp(300),
+      updatedAt: pastTimestamp(300),
+    })
+  );
+
+  // 12. Ended call doc can be deleted by a participant, never by Charlie
+  await assertFails(callDoc(charlieDb).delete());
+  await assertSucceeds(callDoc(aliceDb).delete());
+});
+
+

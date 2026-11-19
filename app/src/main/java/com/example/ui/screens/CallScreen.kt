@@ -63,6 +63,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.R
+import com.example.data.AgoraCallController
 import com.example.data.CallManager
 import com.example.model.ActiveCallState
 import com.example.model.CallStatus
@@ -115,7 +116,8 @@ fun CallScreen(
     var showEncryptionDialog by remember { mutableStateOf(false) }
     val remoteUid = callState.remoteUid
     val isShowingRemoteVideo =
-        callState.isAgoraConfigured &&
+        AgoraCallController.SUPPORTS_VIDEO &&
+            callState.isAgoraConfigured &&
             remoteUid != null &&
             callState.callType == CallType.VIDEO &&
             onAttachRemoteVideo != null
@@ -387,7 +389,10 @@ fun CallScreen(
                         .border(1.5.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(16.dp))
                         .background(Color.Black)
                 ) {
-                    if (callState.isAgoraConfigured && onAttachLocalVideo != null) {
+                    if (AgoraCallController.SUPPORTS_VIDEO &&
+                        callState.isAgoraConfigured &&
+                        onAttachLocalVideo != null
+                    ) {
                         DisposableEffect(callState.callId) {
                             onDispose {
                                 onDetachLocalVideo?.invoke()

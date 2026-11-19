@@ -20,12 +20,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.CallMade
 import androidx.compose.material.icons.automirrored.rounded.CallMissed
 import androidx.compose.material.icons.automirrored.rounded.CallReceived
 import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Call
-import androidx.compose.material.icons.rounded.CallMade
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DataUsage
 import androidx.compose.material.icons.rounded.Email
@@ -36,7 +36,6 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Speed
-import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -558,7 +557,7 @@ private fun CallLogRow(
                 val icon = when {
                     log.isMissed -> Icons.AutoMirrored.Rounded.CallMissed
                     log.isIncoming -> Icons.AutoMirrored.Rounded.CallReceived
-                    else -> Icons.Rounded.CallMade
+                    else -> Icons.AutoMirrored.Rounded.CallMade
                 }
                 val iconColor = if (log.isMissed) CallRed else CallGreen
 

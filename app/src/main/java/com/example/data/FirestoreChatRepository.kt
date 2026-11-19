@@ -7,6 +7,7 @@ import com.example.model.CallType
 import com.example.model.ChatMessage
 import com.example.model.MessageStatus
 import com.example.model.User
+import com.example.utils.buildChatRoomId
 import com.google.firebase.Firebase
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
@@ -19,6 +20,7 @@ import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 import java.util.UUID
@@ -150,6 +152,51 @@ class FirestoreChatRepository(
                 val firestoreError = unwrapFirestoreError(error)
                 if (firestoreError == null && error is CancellationException) throw error
                 if (auth.currentUser?.uid == userId) {
+                    handleFirestoreError(firestoreError ?: error, OperationType.LIST, path)
+                }
+                throw error
+            }
+    }
+
+    /**
+     * Observes real-time messages in the shared two-user room at
+     * `/chats/{chatRoomId}/messages`, filtered by `participantEmails` to match
+     * zero-trust Firestore security rules and sorted chronologically in memory
+     * (ascending) without requiring a manual composite index.
+     */
+    fun observeSharedMessages(
+        currentUserId: String,
+        currentUserEmail: String,
+        contactEmail: String
+    ): Flow<List<ChatMessage>> {
+        val normalizedMyEmail = (auth.currentUser?.email ?: currentUserEmail).trim().lowercase()
+        val normalizedPeerEmail = contactEmail.trim().lowercase()
+        if (!isValidEmailFormat(normalizedMyEmail) || !isValidEmailFormat(normalizedPeerEmail)) {
+            return flowOf(emptyList())
+        }
+
+        val chatRoomId = buildChatRoomId(normalizedMyEmail, normalizedPeerEmail)
+        val path = "chats/$chatRoomId/messages"
+        return db.collection("chats")
+            .document(chatRoomId)
+            .collection("messages")
+            .whereArrayContains("participantEmails", normalizedMyEmail)
+            .snapshots()
+            .map { snapshot ->
+                snapshot.toObjects(
+                    SharedChatMessageDoc::class.java,
+                    DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                )
+                    .sortedWith(
+                        compareBy<SharedChatMessageDoc> { it.createdAt ?: Timestamp(0, 0) }
+                            .thenBy { it.id }
+                    )
+                    .map { it.toDomainMessage(currentUserId, normalizedMyEmail) }
+            }
+            .catch { error ->
+                val firestoreError = unwrapFirestoreError(error)
+                if (firestoreError == null && error is CancellationException) throw error
+                if (auth.currentUser?.uid == currentUserId) {
                     handleFirestoreError(firestoreError ?: error, OperationType.LIST, path)
                 }
                 throw error
@@ -346,6 +393,164 @@ class FirestoreChatRepository(
         }
     }
 
+    /**
+     * Sends a message into the shared two-user room `/chats/{chatRoomId}/messages/{messageId}`
+     * computed via [buildChatRoomId]. Uses server timestamps and denormalized verified participant
+     * emails so both users can exchange messages in real time under zero-trust security rules.
+     */
+    suspend fun sendSharedMessage(
+        currentUserId: String,
+        senderEmail: String,
+        receiverEmail: String,
+        text: String
+    ): Result<Unit> {
+        val cleanText = text.trim()
+        if (cleanText.isEmpty()) {
+            return Result.failure(IllegalArgumentException("Message cannot be empty."))
+        }
+        val boundedText = cleanText.take(2000)
+
+        val normalizedSender = (auth.currentUser?.email ?: senderEmail).trim().lowercase()
+        val normalizedReceiver = receiverEmail.trim().lowercase()
+        if (!isValidEmailFormat(normalizedSender) || !isValidEmailFormat(normalizedReceiver)) {
+            return Result.failure(
+                IllegalArgumentException("A valid Gmail address is required for both chat participants.")
+            )
+        }
+
+        val chatRoomId = buildChatRoomId(normalizedSender, normalizedReceiver)
+        val participantEmails = listOf(normalizedSender, normalizedReceiver).sorted()
+        val messageId = "msg_${UUID.randomUUID().toString().replace("-", "").take(16)}"
+        val docPath = "chats/$chatRoomId/messages/$messageId"
+
+        return try {
+            val verifiedUid = requireUserId(currentUserId)
+            val msgRef = db.collection("chats")
+                .document(chatRoomId)
+                .collection("messages")
+                .document(messageId)
+
+            val payload = mapOf(
+                "chatRoomId" to chatRoomId,
+                "senderUid" to verifiedUid,
+                "senderEmail" to normalizedSender,
+                "receiverEmail" to normalizedReceiver,
+                "participantEmails" to participantEmails,
+                "text" to boundedText,
+                "status" to MessageStatus.SENT.name,
+                "encrypted" to true,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            msgRef.set(payload).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun toggleSharedReaction(
+        currentUserId: String,
+        currentUserEmail: String,
+        contactEmail: String,
+        message: ChatMessage,
+        emoji: String
+    ): Result<Unit> {
+        val normalizedMyEmail = (auth.currentUser?.email ?: currentUserEmail).trim().lowercase()
+        val normalizedPeerEmail = contactEmail.trim().lowercase()
+        if (!isValidEmailFormat(normalizedMyEmail) ||
+            !isValidEmailFormat(normalizedPeerEmail) ||
+            message.id.isBlank() ||
+            emoji.isBlank()
+        ) {
+            return Result.failure(IllegalArgumentException("Invalid reaction parameters."))
+        }
+
+        val chatRoomId = buildChatRoomId(normalizedMyEmail, normalizedPeerEmail)
+        val docPath = "chats/$chatRoomId/messages/${message.id}"
+        return try {
+            requireUserId(currentUserId)
+            val updatedReactions = message.reactions.toMutableMap()
+            if ((updatedReactions[emoji] ?: 0) > 0) {
+                updatedReactions.remove(emoji)
+            } else if (updatedReactions.size < 20) {
+                updatedReactions[emoji] = 1
+            }
+
+            db.collection("chats")
+                .document(chatRoomId)
+                .collection("messages")
+                .document(message.id)
+                .update(
+                    mapOf(
+                        "reactions" to updatedReactions,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                )
+                .await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Advances delivery/read receipt status (`DELIVERED` or `READ`) on incoming messages
+     * received by the current verified user in `/chats/{chatRoomId}/messages`.
+     */
+    suspend fun markSharedMessagesStatus(
+        currentUserId: String,
+        currentUserEmail: String,
+        contactEmail: String,
+        messageIds: List<String>,
+        targetStatus: MessageStatus
+    ): Result<Unit> {
+        if (targetStatus != MessageStatus.DELIVERED && targetStatus != MessageStatus.READ) {
+            return Result.failure(
+                IllegalArgumentException("Only DELIVERED or READ status transitions are supported.")
+            )
+        }
+        val normalizedMyEmail = (auth.currentUser?.email ?: currentUserEmail).trim().lowercase()
+        val normalizedPeerEmail = contactEmail.trim().lowercase()
+        val cleanIds = messageIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (cleanIds.isEmpty()) return Result.success(Unit)
+        if (!isValidEmailFormat(normalizedMyEmail) || !isValidEmailFormat(normalizedPeerEmail)) {
+            return Result.failure(IllegalArgumentException("Invalid participant emails for status update."))
+        }
+
+        val chatRoomId = buildChatRoomId(normalizedMyEmail, normalizedPeerEmail)
+        val collectionPath = "chats/$chatRoomId/messages"
+        return try {
+            requireUserId(currentUserId)
+            val messagesRef = db.collection("chats")
+                .document(chatRoomId)
+                .collection("messages")
+            val updatePayload = mapOf(
+                "status" to targetStatus.name,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            cleanIds.chunked(400).forEach { chunk ->
+                val batch = db.batch()
+                chunk.forEach { messageId ->
+                    batch.update(messagesRef.document(messageId), updatePayload)
+                }
+                batch.commit().await()
+            }
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, collectionPath)
+            Result.failure(e)
+        }
+    }
+
     suspend fun recordCompletedCall(
         userId: String,
         contact: User,
@@ -453,5 +658,13 @@ class FirestoreChatRepository(
             handleFirestoreError(e, OperationType.UPDATE, docPath)
             Result.failure(e)
         }
+    }
+
+    private fun isValidEmailFormat(email: String): Boolean {
+        return email.length in 3..120 && EMAIL_REGEX.matches(email)
+    }
+
+    private companion object {
+        val EMAIL_REGEX = Regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$")
     }
 }

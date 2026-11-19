@@ -1,13 +1,17 @@
 package com.example
 
 import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -38,6 +42,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.data.AgoraCallController
+import com.example.data.CallSignaling
 import com.example.data.FirestoreChatRepository
 import com.example.data.UserManager
 import com.example.data.authStateFlow
@@ -57,6 +62,7 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.justchat.app.sync.JustChatManager
 
 class MainActivity : ComponentActivity() {
 
@@ -64,11 +70,20 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        // Bind JustChatManager to the named Firestore DB and start online/offline presence tracking
+        JustChatManager.initialize(applicationContext)
+        JustChatManager.startPresenceTracking()
+
         setContent {
             MyApplicationTheme {
                 JustChatApp()
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        JustChatManager.startPresenceTracking()
     }
 }
 
@@ -120,6 +135,7 @@ private fun AuthenticatedJustChatContent(
                 JustChatViewModel(
                     repository = FirestoreChatRepository(db),
                     userManager = UserManager(db),
+                    callSignaling = CallSignaling(db),
                     agoraController = AgoraCallController(app.applicationContext),
                     currentUserId = firebaseUser.uid,
                     initialUser = firebaseUser
@@ -143,25 +159,40 @@ private fun AuthenticatedJustChatContent(
     val lowLatency = profileDoc?.lowLatencyEnabled ?: true
     val totalSavedMb = (profileDoc?.totalDataSavedMb ?: 0.0).toFloat()
 
-    // Runtime Permission Request for Camera and Microphone
+    // Runtime Permission Check & Request for Agora Voice / Video Calling
     var pendingCallAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val permissionsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        pendingCallAction?.invoke()
+    ) { grants ->
+        val micGranted = grants[Manifest.permission.RECORD_AUDIO] == true ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+
+        if (micGranted) {
+            pendingCallAction?.invoke()
+        } else {
+            val message = context.getString(R.string.call_mic_permission_denied)
+            viewModel.reportActionError(message)
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
         pendingCallAction = null
     }
 
+    val ensurePermissionsAndRunCall: (CallType, () -> Unit) -> Unit = { type, onGranted ->
+        if (checkCallPermissions(context, type)) {
+            onGranted()
+        } else {
+            pendingCallAction = onGranted
+            permissionsLauncher.launch(requiredCallPermissions(type))
+        }
+    }
+
     val requestCallPermissionsAndStart: (User, CallType) -> Unit = { contact, type ->
-        pendingCallAction = {
+        ensurePermissionsAndRunCall(type) {
             viewModel.startCall(contact, type)
         }
-        permissionsLauncher.launch(
-            arrayOf(
-                Manifest.permission.CAMERA,
-                Manifest.permission.RECORD_AUDIO
-            )
-        )
     }
 
     var showSearchUserScreen by remember { mutableStateOf(false) }
@@ -186,15 +217,13 @@ private fun AuthenticatedJustChatContent(
                             onToggleCamera = { viewModel.toggleCamera() },
                             onToggleCameraFacing = { viewModel.toggleCameraFacing() },
                             onSetMinimized = { viewModel.setMinimized(it) },
-                            onAnswerCall = { viewModel.answerCall() },
-                            onEndCall = { viewModel.endCall() },
-                            onToggleSpeaker = { viewModel.toggleSpeaker() },
-                            onAttachLocalVideo = { surfaceView -> viewModel.attachLocalVideo(surfaceView) },
-                            onDetachLocalVideo = { viewModel.detachLocalVideo() },
-                            onAttachRemoteVideo = { uid, surfaceView ->
-                                viewModel.attachRemoteVideo(uid, surfaceView)
+                            onAnswerCall = {
+                                ensurePermissionsAndRunCall(callState.callType) {
+                                    viewModel.answerCall()
+                                }
                             },
-                            onDetachRemoteVideo = { uid -> viewModel.detachRemoteVideo(uid) }
+                            onEndCall = { viewModel.endCall() },
+                            onToggleSpeaker = { viewModel.toggleSpeaker() }
                         )
                     }
                 }
@@ -219,12 +248,12 @@ private fun AuthenticatedJustChatContent(
                                 requestCallPermissionsAndStart(contact, type)
                             },
                             onSendMessage = { text, _, _, _ ->
-                                viewModel.sendMessage(contact.id, text)
+                                viewModel.sendMessage(contact, text)
                             },
                             onToggleReaction = { messageId, emoji ->
                                 val targetMsg = chatMessages.firstOrNull { it.id == messageId }
                                 if (targetMsg != null) {
-                                    viewModel.toggleReaction(contact.id, targetMsg, emoji)
+                                    viewModel.toggleReaction(contact, targetMsg, emoji)
                                 }
                             }
                         )
@@ -323,3 +352,20 @@ private fun AuthenticatedJustChatContent(
         }
     }
 }
+
+private fun requiredCallPermissions(type: CallType): Array<String> {
+    return when (type) {
+        CallType.AUDIO -> arrayOf(Manifest.permission.RECORD_AUDIO)
+        CallType.VIDEO -> arrayOf(
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.CAMERA
+        )
+    }
+}
+
+private fun checkCallPermissions(context: Context, type: CallType): Boolean {
+    return requiredCallPermissions(type).all { permission ->
+        ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+    }
+}
+

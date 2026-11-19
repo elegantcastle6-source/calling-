@@ -38,3 +38,6 @@ val ChatBubbleSender = Color(0xFF4F46E5)
 val ChatBubbleSenderOn = Color(0xFFFFFFFF)
 val ChatBubbleReceiverLight = Color(0xFFF1F5F9)
 val ChatBubbleReceiverDark = Color(0xFF1E293B)
+
+val TickReadBlue = Color(0xFF38BDF8)
+val TickSentGrey = Color(0xFF94A3B8)

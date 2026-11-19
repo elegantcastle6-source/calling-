@@ -81,7 +81,7 @@ data class MessageDoc(
 ) {
     fun toDomainMessage(): ChatMessage {
         val parsedStatus = enumValues<MessageStatus>()
-            .firstOrNull { it.name == status } ?: MessageStatus.SENT
+            .firstOrNull { it.name.equals(status, ignoreCase = true) } ?: MessageStatus.SENT
         val timestampMs = (createdAt ?: updatedAt ?: Timestamp.now()).toDate().time
         val parsedReactions = reactions
             ?.mapValues { (_, count) -> count.toInt() }
@@ -140,6 +140,46 @@ data class CallLogDoc(
             dataUsedKb = dataUsedKb,
             wasLowDataMode = lowDataMode,
             wasEncrypted = encrypted
+        )
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class SharedChatMessageDoc(
+    @DocumentId val id: String = "",
+    val chatRoomId: String = "",
+    val senderUid: String = "",
+    val senderEmail: String = "",
+    val receiverEmail: String = "",
+    val participantEmails: List<String> = emptyList(),
+    val text: String = "",
+    val status: String = MessageStatus.SENT.name,
+    val reactions: Map<String, Long>? = null,
+    val encrypted: Boolean = true,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    fun toDomainMessage(currentUserUid: String, currentUserEmail: String): ChatMessage {
+        val parsedStatus = enumValues<MessageStatus>()
+            .firstOrNull { it.name.equals(status, ignoreCase = true) } ?: MessageStatus.SENT
+        val timestampMs = (createdAt ?: updatedAt ?: Timestamp.now()).toDate().time
+        val parsedReactions = reactions
+            ?.mapValues { (_, count) -> count.toInt() }
+            ?: emptyMap()
+        val normalizedMyEmail = currentUserEmail.trim().lowercase()
+        val isSentByMe = (currentUserUid.isNotBlank() && senderUid == currentUserUid) ||
+            (normalizedMyEmail.isNotBlank() && senderEmail.equals(normalizedMyEmail, ignoreCase = true))
+        return ChatMessage(
+            id = id,
+            senderId = if (isSentByMe) "current_user" else senderEmail,
+            receiverId = receiverEmail,
+            text = text,
+            mediaType = MediaType.NONE,
+            timestamp = timestampMs,
+            status = parsedStatus,
+            reactions = parsedReactions,
+            isEncrypted = encrypted
         )
     }
 }
