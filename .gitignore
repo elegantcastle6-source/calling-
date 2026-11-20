@@ -17,3 +17,11 @@ local.properties
 .env
 debug.keystore
 *-debug.log
+web-voice-client/node_modules
+web-voice-client/dist
+web-voice-client/.env
+web-voice-client/.env.local
+next-rtc-starter/node_modules
+next-rtc-starter/.next
+next-rtc-starter/.env
+next-rtc-starter/.env.local

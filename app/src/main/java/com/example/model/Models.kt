@@ -68,6 +68,39 @@ enum class CallStatus {
     ENDED
 }
 
+enum class NetworkStability(val activeBars: Int, val ratingLabel: String) {
+    UNKNOWN(0, "Checking…"),
+    EXCELLENT(4, "Excellent"),
+    GOOD(3, "Good"),
+    FAIR(2, "Fair"),
+    POOR(1, "Weak"),
+    DISCONNECTED(0, "Unstable");
+
+    companion object {
+        /**
+         * Maps Agora's `onNetworkQuality` / `network-quality` codes (0 = unknown,
+         * 1 = excellent, 2 = good, 3 = poor, 4 = bad, 5 = very bad, 6 = down)
+         * using the worse of uplink (tx) and downlink (rx) when both are reported.
+         */
+        fun fromAgoraQuality(txQuality: Int, rxQuality: Int): NetworkStability {
+            val effective = when {
+                txQuality <= 0 && rxQuality <= 0 -> 0
+                txQuality <= 0 -> rxQuality
+                rxQuality <= 0 -> txQuality
+                else -> maxOf(txQuality, rxQuality)
+            }
+            return when (effective) {
+                1 -> EXCELLENT
+                2 -> GOOD
+                3 -> FAIR
+                4, 5 -> POOR
+                6 -> DISCONNECTED
+                else -> UNKNOWN
+            }
+        }
+    }
+}
+
 data class CallLogItem(
     val id: String,
     val contact: User,
@@ -107,7 +140,8 @@ data class ActiveCallState(
     val fps: Int = 60,
     val packetLossPercent: Float = 0.0f,
     val jitterMs: Int = 2,
-    val networkQualityRating: String = "Ultra-Fast (5/5)",
+    val networkQualityRating: String = "Checking…",
+    val networkStability: NetworkStability = NetworkStability.UNKNOWN,
     val isMinimized: Boolean = false,
     val channelName: String = "",
     val remoteUid: Int? = null,

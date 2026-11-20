@@ -1,4 +1,5 @@
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import java.util.Properties
 
 plugins {
   alias(libs.plugins.android.application)
@@ -23,6 +24,30 @@ android {
     ndk {
       abiFilters += listOf("armeabi-v7a", "arm64-v8a")
     }
+
+    val escapedTokenServerUrl = run {
+      val props = Properties()
+      providers.fileContents(rootProject.layout.projectDirectory.file(".env.example"))
+        .asText.orNull?.let { props.load(it.reader()) }
+      providers.fileContents(rootProject.layout.projectDirectory.file(".env"))
+        .asText.orNull?.let { props.load(it.reader()) }
+      val raw = (
+        props.getProperty("AGORA_TOKEN_SERVER_URL")
+          ?: providers.environmentVariable("AGORA_TOKEN_SERVER_URL").orNull
+          ?: "OPTIONAL_AGORA_TOKEN_SERVER_URL"
+        ).trim()
+      val unquoted = if (raw.length >= 2 && raw.startsWith("\"") && raw.endsWith("\"")) {
+        raw.substring(1, raw.length - 1)
+      } else {
+        raw
+      }
+      unquoted
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\n", "")
+        .replace("\r", "")
+    }
+    buildConfigField("String", "AGORA_TOKEN_SERVER_URL", "\"$escapedTokenServerUrl\"")
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
@@ -79,6 +104,7 @@ secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
   ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
+  ignoreList.add("AGORA_TOKEN_SERVER_URL")
 }
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }

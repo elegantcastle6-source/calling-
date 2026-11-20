@@ -1,9 +1,13 @@
 package com.example
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.KeyEvent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -24,6 +28,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -47,6 +52,7 @@ import com.example.data.FirestoreChatRepository
 import com.example.data.UserManager
 import com.example.data.authStateFlow
 import com.example.data.signOutWithGoogle
+import com.example.model.CallStatus
 import com.example.model.CallType
 import com.example.model.User
 import com.example.ui.components.MinimizedCallBar
@@ -56,6 +62,7 @@ import com.example.ui.screens.ChatDetailScreen
 import com.example.ui.screens.MainDashboardScreen
 import com.example.ui.screens.SearchUserScreen
 import com.example.ui.theme.MyApplicationTheme
+import com.example.utils.CallRingtonePlayer
 import com.example.viewmodel.JustChatViewModel
 import com.example.viewmodel.UiState
 import com.google.firebase.Firebase
@@ -66,9 +73,28 @@ import com.justchat.app.sync.JustChatManager
 
 class MainActivity : ComponentActivity() {
 
+    private var screenOffReceiverRegistered = false
+
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                // Power button / screen off: silence incoming ringtone only; keep active call alive
+                CallRingtonePlayer.onPowerButtonOrScreenOff()
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        ContextCompat.registerReceiver(
+            this,
+            screenOffReceiver,
+            IntentFilter(Intent.ACTION_SCREEN_OFF),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        screenOffReceiverRegistered = true
 
         // Bind JustChatManager to the named Firestore DB and start online/offline presence tracking
         JustChatManager.initialize(applicationContext)
@@ -84,6 +110,33 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         JustChatManager.startPresenceTracking()
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (
+            event.action == KeyEvent.ACTION_DOWN &&
+            CallRingtonePlayer.isCurrentlyRinging() &&
+            (event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || event.keyCode == KeyEvent.KEYCODE_VOLUME_UP)
+        ) {
+            CallRingtonePlayer.onPowerButtonOrScreenOff()
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun onDestroy() {
+        if (screenOffReceiverRegistered) {
+            try {
+                unregisterReceiver(screenOffReceiver)
+            } catch (_: IllegalArgumentException) {
+                // Already unregistered
+            }
+            screenOffReceiverRegistered = false
+        }
+        if (!isChangingConfigurations) {
+            CallRingtonePlayer.stopRingtone()
+        }
+        super.onDestroy()
     }
 }
 
@@ -152,6 +205,23 @@ private fun AuthenticatedJustChatContent(
     val activeCall by viewModel.activeCall.collectAsStateWithLifecycle()
     val actionError by viewModel.actionError.collectAsStateWithLifecycle()
     val userSearchState by viewModel.userSearchState.collectAsStateWithLifecycle()
+
+    // Ring once per incoming call; silencing via power/volume buttons will not restart ringing on wake.
+    val incomingRingingCallId = activeCall
+        ?.takeIf { it.status == CallStatus.INCOMING_RINGING }
+        ?.callId
+    DisposableEffect(incomingRingingCallId) {
+        if (incomingRingingCallId != null) {
+            CallRingtonePlayer.startDefaultRingtone(context)
+        } else {
+            CallRingtonePlayer.stopRingtone()
+        }
+        onDispose {
+            if (incomingRingingCallId != null) {
+                CallRingtonePlayer.stopRingtone()
+            }
+        }
+    }
 
     val profileDoc = (profileState as? UiState.Success)?.data
     val currentUser = profileDoc?.toDomainUser() ?: viewModel.fallbackUser

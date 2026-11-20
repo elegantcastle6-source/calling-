@@ -70,6 +70,7 @@ import com.example.model.CallStatus
 import com.example.model.CallType
 import com.example.ui.components.CameraPreview
 import com.example.ui.components.EncryptionDialog
+import com.example.ui.components.NetworkSignalIndicator
 import com.example.ui.components.UserAvatar
 import com.example.ui.theme.CallAmber
 import com.example.ui.theme.CallGreen
@@ -314,6 +315,14 @@ fun CallScreen(
                     },
                     textAlign = TextAlign.Center
                 )
+
+                if (callState.status == CallStatus.CONNECTED || callState.status == CallStatus.DIALING) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    NetworkSignalIndicator(
+                        stability = callState.networkStability,
+                        latencyMs = callState.latencyMs
+                    )
+                }
 
                 val note = callState.connectionNote
                 if (!note.isNullOrBlank()) {

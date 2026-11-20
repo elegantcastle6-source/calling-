@@ -19,7 +19,9 @@ import com.example.model.CallStatus
 import com.example.model.CallType
 import com.example.model.ChatMessage
 import com.example.model.MessageStatus
+import com.example.model.NetworkStability
 import com.example.model.User
+import com.example.utils.CallRingtonePlayer
 import com.example.utils.UserPresenceManager
 import com.example.utils.buildChatRoomId
 import com.google.firebase.auth.FirebaseUser
@@ -419,6 +421,7 @@ class JustChatViewModel(
         JustChatManager.stopPresenceTracking()
         searchJob?.cancel()
         _userSearchState.value = UserSearchUiState.Idle
+        CallRingtonePlayer.stopRingtone()
         endCall(persistLog = false, notifySignaling = false)
         _selectedContact.value = null
     }
@@ -635,6 +638,7 @@ class JustChatViewModel(
     }
 
     fun startCall(contact: User, type: CallType) {
+        CallRingtonePlayer.stopRingtone()
         callTickerJob?.cancel()
         callSignalingJob?.cancel()
         agoraController.leaveCall()
@@ -750,6 +754,7 @@ class JustChatViewModel(
     fun answerCall() {
         val current = _activeCall.value ?: return
         if (current.status != CallStatus.INCOMING_RINGING) return
+        CallRingtonePlayer.stopRingtone()
 
         val roomId = activeCallRoomId
         if (roomId != null) {
@@ -823,6 +828,7 @@ class JustChatViewModel(
     }
 
     fun endCall(persistLog: Boolean = true, notifySignaling: Boolean = true) {
+        CallRingtonePlayer.stopRingtone()
         callTickerJob?.cancel()
         callSignalingJob?.cancel()
         agoraController.leaveCall()
@@ -918,6 +924,17 @@ class JustChatViewModel(
                 }
             }
 
+            override fun onNetworkQualityChanged(txQuality: Int, rxQuality: Int) {
+                val stability = NetworkStability.fromAgoraQuality(txQuality, rxQuality)
+                _activeCall.update { call ->
+                    if (call == null || call.callId != callId) return@update call
+                    call.copy(
+                        networkStability = stability,
+                        networkQualityRating = stability.ratingLabel
+                    )
+                }
+            }
+
             override fun onError(errorCode: Int, message: String) {
                 _activeCall.update { call ->
                     if (call == null || call.callId != callId) return@update call
@@ -948,6 +965,7 @@ class JustChatViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        CallRingtonePlayer.stopRingtone()
         callTickerJob?.cancel()
         callSignalingJob?.cancel()
         incomingCallsJob?.cancel()

@@ -103,11 +103,9 @@ fun MinimizedCallBar(
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold
                         )
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(CallGreen)
+                        NetworkSignalIndicator(
+                            stability = callState.networkStability,
+                            compact = true
                         )
                     }
 

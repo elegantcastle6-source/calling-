@@ -32,6 +32,7 @@ interface AgoraCallListener {
     fun onRemoteUserJoined(uid: Int)
     fun onRemoteUserLeft(uid: Int, reason: Int)
     fun onStatsUpdated(stats: AgoraCallStats)
+    fun onNetworkQualityChanged(txQuality: Int, rxQuality: Int) = Unit
     fun onError(errorCode: Int, message: String)
 }
 
@@ -156,6 +157,15 @@ class AgoraCallController(
             )
             runOnMainThread {
                 activeListener?.onStatsUpdated(mappedStats)
+            }
+        }
+
+        override fun onNetworkQuality(uid: Int, txQuality: Int, rxQuality: Int) {
+            super.onNetworkQuality(uid, txQuality, rxQuality)
+            // uid == 0 reports the local user's uplink (txQuality) and downlink (rxQuality) stability.
+            if (uid != 0) return
+            runOnMainThread {
+                activeListener?.onNetworkQualityChanged(txQuality, rxQuality)
             }
         }
 

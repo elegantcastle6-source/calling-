@@ -58,6 +58,8 @@ import com.example.R
 import com.example.data.AgoraCallController
 import com.example.data.AgoraCallListener
 import com.example.data.AgoraCallStats
+import com.example.model.NetworkStability
+import com.example.ui.components.NetworkSignalIndicator
 import com.example.ui.theme.CallGreen
 import com.example.ui.theme.CallRed
 import com.example.ui.theme.DarkBackground
@@ -108,6 +110,8 @@ fun AgoraVoiceCallScreen(
     var isMuted by remember(channelName) { mutableStateOf(false) }
     var isSpeakerOn by remember(channelName) { mutableStateOf(true) }
     var elapsedSeconds by remember(channelName) { mutableIntStateOf(0) }
+    var networkStability by remember(channelName) { mutableStateOf(NetworkStability.UNKNOWN) }
+    var latencyMs by remember(channelName) { mutableIntStateOf(0) }
 
     val startVoiceCall = remember(agoraController, channelName, peerName) {
         {
@@ -140,7 +144,13 @@ fun AgoraVoiceCallScreen(
                             )
                         }
 
-                        override fun onStatsUpdated(stats: AgoraCallStats) = Unit
+                        override fun onStatsUpdated(stats: AgoraCallStats) {
+                            latencyMs = stats.latencyMs
+                        }
+
+                        override fun onNetworkQualityChanged(txQuality: Int, rxQuality: Int) {
+                            networkStability = NetworkStability.fromAgoraQuality(txQuality, rxQuality)
+                        }
 
                         override fun onError(errorCode: Int, message: String) {
                             isConnected = false
@@ -270,6 +280,11 @@ fun AgoraVoiceCallScreen(
                         DarkOnBackground.copy(alpha = 0.72f)
                     },
                     modifier = Modifier.testTag("agora_call_status_label")
+                )
+
+                NetworkSignalIndicator(
+                    stability = networkStability,
+                    latencyMs = latencyMs
                 )
 
                 Text(

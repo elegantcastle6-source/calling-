@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Just Chat — Agora Web Voice Call (Audio Only)</title>
+  </head>
+  <body>
+    <main class="container">
+      <header class="header">
+        <div>
+          <h1>Just Chat Voice (Web SDK 4.x)</h1>
+          <p class="subtitle">Communication profile · Audio-only two-way call</p>
+        </div>
+        <div class="header-status">
+          <span id="signal-indicator" class="signal-pill signal-unknown" hidden role="status" aria-label="Connection stability: Checking">
+            <span class="signal-bars" aria-hidden="true">
+              <span class="signal-bar" style="height: 35%"></span>
+              <span class="signal-bar" style="height: 56%"></span>
+              <span class="signal-bar" style="height: 78%"></span>
+              <span class="signal-bar" style="height: 100%"></span>
+            </span>
+            <span id="signal-label">Checking…</span>
+          </span>
+          <span id="status-badge" class="status-badge status-idle">Disconnected</span>
+        </div>
+      </header>
+
+      <section class="card">
+        <h2>Session Configuration</h2>
+        <div class="grid">
+          <label class="field">
+            <span>Agora App ID</span>
+            <input id="app-id-input" type="password" autocomplete="off" placeholder="Enter your Agora App ID" />
+          </label>
+          <label class="field">
+            <span>Channel Name</span>
+            <input id="channel-input" type="text" autocomplete="off" value="justchat_voice_room" placeholder="e.g. justchat_voice_room" />
+          </label>
+          <label class="field">
+            <span>Optional Numeric RTC UID (leave blank to auto-assign)</span>
+            <input id="uid-input" type="number" min="0" step="1" placeholder="Auto-assign (null)" />
+          </label>
+          <label class="field">
+            <span>Console Temporary Token (matches channel + UID)</span>
+            <input id="token-input" type="password" autocomplete="off" placeholder="Paste Console Temp Token for this UID" />
+          </label>
+          <label class="field field-full">
+            <span>Optional Token Server URL (for production dynamic tokens &amp; renewal)</span>
+            <input id="token-server-input" type="url" autocomplete="off" placeholder="https://your-token-server.example.com/rtc-token" />
+          </label>
+        </div>
+
+        <p id="local-summary" class="summary"></p>
+
+        <div class="controls">
+          <button id="join-btn" type="button" class="btn btn-primary">Join Voice Call</button>
+          <button id="mute-btn" type="button" class="btn btn-secondary" disabled>Mute Microphone</button>
+          <button id="leave-btn" type="button" class="btn btn-danger" disabled>Leave Call</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Remote Audio Participants</h2>
+        <ul id="remote-list" class="remote-list"></ul>
+      </section>
+
+      <section class="card">
+        <h2>Session Events</h2>
+        <ul id="event-log" class="event-log"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
