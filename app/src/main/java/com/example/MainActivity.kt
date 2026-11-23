@@ -65,6 +65,7 @@ import com.example.ui.screens.MainDashboardScreen
 import com.example.ui.screens.SearchUserScreen
 import com.example.ui.theme.MyApplicationTheme
 import com.example.utils.CallRingtonePlayer
+import com.example.utils.CallWakeHelper
 import com.example.utils.JustChatNotifications
 import com.example.viewmodel.JustChatViewModel
 import com.example.viewmodel.UiState
@@ -243,12 +244,14 @@ private fun AuthenticatedJustChatContent(
                         )
                     },
                     onIncomingCallAlert = { call ->
-                        JustChatNotifications.showIncomingCallNotification(
-                            context = app.applicationContext,
-                            callerName = call.contact.name,
-                            callerEmail = call.contact.gmail,
-                            isVideo = call.callType == CallType.VIDEO
-                        )
+                        CallWakeHelper.wakeForIncomingCall(app.applicationContext) {
+                            JustChatNotifications.showIncomingCallNotification(
+                                context = app.applicationContext,
+                                callerName = call.contact.name,
+                                callerEmail = call.contact.gmail,
+                                isVideo = call.callType == CallType.VIDEO
+                            )
+                        }
                     },
                     onCancelCallAlert = {
                         JustChatNotifications.cancelIncomingCallNotification(app.applicationContext)
@@ -284,7 +287,9 @@ private fun AuthenticatedJustChatContent(
         ?.callId
     DisposableEffect(incomingRingingCallId) {
         if (incomingRingingCallId != null) {
-            CallRingtonePlayer.startDefaultRingtone(context)
+            CallWakeHelper.wakeForIncomingCall(context) {
+                CallRingtonePlayer.startDefaultRingtone(context)
+            }
         } else {
             CallRingtonePlayer.stopRingtone()
         }

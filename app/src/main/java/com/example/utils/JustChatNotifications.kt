@@ -1,6 +1,5 @@
 package com.example.utils
 
-import android.Manifest
 import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.Manifest
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
@@ -76,17 +76,20 @@ object JustChatNotifications {
         context: Context,
         senderName: String,
         senderEmail: String,
-        messageText: String
+        messageText: String,
+        targetActivityClass: Class<*> = MainActivity::class.java
     ) {
         val appContext = context.applicationContext
         if (!hasNotificationPermission(appContext)) return
         createChannels(appContext)
 
-        val openChatIntent = Intent(appContext, MainActivity::class.java).apply {
+        val openChatIntent = Intent(appContext, targetActivityClass).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra(EXTRA_CONTACT_EMAIL, senderEmail)
+            if (senderEmail.isNotBlank()) {
+                putExtra(EXTRA_CONTACT_EMAIL, senderEmail)
+            }
         }
-        val requestCode = senderEmail.lowercase().hashCode()
+        val requestCode = senderEmail.ifBlank { senderName }.lowercase().hashCode()
         val contentIntent = PendingIntent.getActivity(
             appContext,
             requestCode,
@@ -116,7 +119,8 @@ object JustChatNotifications {
         context: Context,
         callerName: String,
         callerEmail: String,
-        isVideo: Boolean
+        isVideo: Boolean,
+        fullScreen: Boolean = false
     ) {
         val appContext = context.applicationContext
         if (!hasNotificationPermission(appContext)) return
@@ -150,12 +154,24 @@ object JustChatNotifications {
             .setAutoCancel(false)
             .setContentIntent(contentIntent)
 
+        if (fullScreen && canUseFullScreenIntent(appContext)) {
+            builder.setFullScreenIntent(contentIntent, true)
+        }
+
         // Avoid double-ringing when CallRingtonePlayer is active or ringtone is muted in Settings
         if (CallRingtonePlayer.isCurrentlyRinging() || !CallRingtoneSettings.isRingtoneEnabled(appContext)) {
             builder.setSilent(true)
         }
 
         NotificationManagerCompat.from(appContext).notify(CALL_NOTIFICATION_ID, builder.build())
+    }
+
+    private fun canUseFullScreenIntent(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return true
+        }
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+        return manager.canUseFullScreenIntent()
     }
 
     fun cancelIncomingCallNotification(context: Context) {

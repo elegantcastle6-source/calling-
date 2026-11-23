@@ -13,10 +13,11 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 
 /**
- * Tracks online/offline user presence in Firebase Realtime Database at `presence/{uid}/status`.
+ * Tracks online/offline user presence in Firebase Realtime Database at `presence/{userId}`.
  *
- * Uses `.info/connected` and `onDisconnect()` so users automatically flip to `"offline"`
- * if the app closes or network connectivity drops.
+ * Uses `.info/connected` and `onDisconnect().setValue(...)` so the server automatically
+ * marks the user offline (`online = false`, `lastSeen = ServerValue.TIMESTAMP`) on app
+ * crash, process kill, or network disconnect.
  */
 object UserPresenceManager {
 
@@ -28,22 +29,25 @@ object UserPresenceManager {
     private var activeUid: String? = null
     private var connectedRef: DatabaseReference? = null
     private var connectedListener: ValueEventListener? = null
-    private var activeStatusRef: DatabaseReference? = null
-    private var activeLastChangedRef: DatabaseReference? = null
+    private var activePresenceRef: DatabaseReference? = null
 
     fun setupUserPresence(databaseUrl: String = DEFAULT_DATABASE_URL) {
-        val currentUser = FirebaseAuth.getInstance().currentUser ?: return
-        val uid = currentUser.uid
+        val uid = FirebaseAuth.getInstance().currentUser?.uid ?: return
+        goOnline(userId = uid, databaseUrl = databaseUrl)
+    }
+
+    fun goOnline(userId: String, databaseUrl: String = DEFAULT_DATABASE_URL) {
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return
 
         synchronized(lock) {
-            if (activeUid == uid && connectedListener != null) {
+            if (activeUid == cleanUid && connectedListener != null) {
                 return
             }
             detachLocked(markOffline = false)
 
             val database = resolveDatabase(databaseUrl) ?: return
-            val statusRef = database.getReference("presence/$uid/status")
-            val lastChangedRef = database.getReference("presence/$uid/lastChanged")
+            val presenceRef = database.getReference("presence/$cleanUid")
             val infoConnectedRef = database.getReference(".info/connected")
 
             val listener = object : ValueEventListener {
@@ -51,18 +55,15 @@ object UserPresenceManager {
                     val connected = snapshot.getValue(Boolean::class.java) ?: false
                     if (!connected) return
 
-                    // Register onDisconnect first so sudden network drops always transition to offline
-                    statusRef.onDisconnect().setValue("offline")
-                    lastChangedRef.onDisconnect().setValue(ServerValue.TIMESTAMP)
-
-                    statusRef.setValue("online").addOnFailureListener { error ->
+                    // Server automatically sets offline on crash, close, or disconnect
+                    presenceRef.onDisconnect().setValue(offlinePayload())
+                    presenceRef.setValue(onlinePayload()).addOnFailureListener { error ->
                         Log.e(
                             TAG,
                             "Failed to write online status to Realtime Database: ${error.localizedMessage}",
                             error
                         )
                     }
-                    lastChangedRef.setValue(ServerValue.TIMESTAMP)
                 }
 
                 override fun onCancelled(error: DatabaseError) {
@@ -72,13 +73,29 @@ object UserPresenceManager {
 
             try {
                 infoConnectedRef.addValueEventListener(listener)
-                activeUid = uid
+                activeUid = cleanUid
                 connectedRef = infoConnectedRef
                 connectedListener = listener
-                activeStatusRef = statusRef
-                activeLastChangedRef = lastChangedRef
+                activePresenceRef = presenceRef
             } catch (t: Throwable) {
                 Log.w(TAG, "Failed to attach Firebase Realtime Database presence listener", t)
+            }
+        }
+    }
+
+    fun goOffline(userId: String, databaseUrl: String = DEFAULT_DATABASE_URL) {
+        val cleanUid = userId.trim()
+        if (cleanUid.isBlank()) return
+
+        synchronized(lock) {
+            if (activeUid == cleanUid) {
+                detachLocked(markOffline = false)
+            }
+            val database = resolveDatabase(databaseUrl) ?: return
+            try {
+                database.getReference("presence/$cleanUid").setValue(offlinePayload())
+            } catch (t: Throwable) {
+                Log.w(TAG, "Unable to mark user $cleanUid offline", t)
             }
         }
     }
@@ -94,36 +111,36 @@ object UserPresenceManager {
     }
 
     /**
-     * Observes another user's live `"online"` / `"offline"` presence status.
+     * Observes another user's live presence at `presence/{uid}`.
      */
     fun observeUserOnlineStatus(
         uid: String,
         databaseUrl: String = DEFAULT_DATABASE_URL
     ): Flow<Boolean> = callbackFlow {
+        val cleanUid = uid.trim()
         val database = resolveDatabase(databaseUrl)
-        if (database == null || uid.isBlank()) {
+        if (database == null || cleanUid.isBlank()) {
             trySend(false)
             close()
             return@callbackFlow
         }
 
-        val statusRef = database.getReference("presence/$uid/status")
+        val presenceRef = database.getReference("presence/$cleanUid")
         val listener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                val status = snapshot.getValue(String::class.java)
-                trySend(status == "online")
+                trySend(snapshot.isPresenceOnline())
             }
 
             override fun onCancelled(error: DatabaseError) {
-                Log.w(TAG, "Presence observation cancelled for $uid: ${error.message}")
+                Log.w(TAG, "Presence observation cancelled for $cleanUid: ${error.message}")
                 trySend(false)
             }
         }
 
         try {
-            statusRef.addValueEventListener(listener)
+            presenceRef.addValueEventListener(listener)
         } catch (t: Throwable) {
-            Log.w(TAG, "Unable to observe presence for $uid", t)
+            Log.w(TAG, "Unable to observe presence for $cleanUid", t)
             trySend(false)
             close()
             return@callbackFlow
@@ -131,16 +148,16 @@ object UserPresenceManager {
 
         awaitClose {
             try {
-                statusRef.removeEventListener(listener)
+                presenceRef.removeEventListener(listener)
             } catch (t: Throwable) {
-                Log.w(TAG, "Failed removing presence observer for $uid", t)
+                Log.w(TAG, "Failed removing presence observer for $cleanUid", t)
             }
         }
     }
 
     /**
      * Callback-based helper to observe a friend's live online/offline presence at
-     * `presence/{friendUid}/status`. Returns the attached [ValueEventListener] so callers
+     * `presence/{friendUid}`. Returns the attached [ValueEventListener] so callers
      * can remove it via [removePresenceObserver].
      */
     fun observeUserPresence(
@@ -151,11 +168,10 @@ object UserPresenceManager {
         val trimmedUid = friendUid.trim()
         if (trimmedUid.isEmpty()) return null
         val database = resolveDatabase(databaseUrl) ?: return null
-        val statusRef = database.getReference("presence/$trimmedUid/status")
+        val presenceRef = database.getReference("presence/$trimmedUid")
         val listener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                val status = snapshot.getValue(String::class.java)
-                onStatusChanged(status == "online")
+                onStatusChanged(snapshot.isPresenceOnline())
             }
 
             override fun onCancelled(error: DatabaseError) {
@@ -163,7 +179,7 @@ object UserPresenceManager {
             }
         }
         return try {
-            statusRef.addValueEventListener(listener)
+            presenceRef.addValueEventListener(listener)
             listener
         } catch (t: Throwable) {
             Log.w(TAG, "Unable to attach presence listener for $trimmedUid", t)
@@ -180,7 +196,7 @@ object UserPresenceManager {
         if (trimmedUid.isEmpty()) return
         val database = resolveDatabase(databaseUrl) ?: return
         try {
-            database.getReference("presence/$trimmedUid/status").removeEventListener(listener)
+            database.getReference("presence/$trimmedUid").removeEventListener(listener)
         } catch (t: Throwable) {
             Log.w(TAG, "Unable to detach presence listener for $trimmedUid", t)
         }
@@ -198,8 +214,7 @@ object UserPresenceManager {
         }
         if (markOffline) {
             try {
-                activeStatusRef?.setValue("offline")
-                activeLastChangedRef?.setValue(ServerValue.TIMESTAMP)
+                activePresenceRef?.setValue(offlinePayload())
             } catch (t: Throwable) {
                 Log.w(TAG, "Unable to mark user offline during detach", t)
             }
@@ -207,8 +222,27 @@ object UserPresenceManager {
         activeUid = null
         connectedRef = null
         connectedListener = null
-        activeStatusRef = null
-        activeLastChangedRef = null
+        activePresenceRef = null
+    }
+
+    private fun onlinePayload(): Map<String, Any> = mapOf(
+        "online" to true,
+        "status" to "online",
+        "lastSeen" to ServerValue.TIMESTAMP,
+        "lastChanged" to ServerValue.TIMESTAMP
+    )
+
+    private fun offlinePayload(): Map<String, Any> = mapOf(
+        "online" to false,
+        "status" to "offline",
+        "lastSeen" to ServerValue.TIMESTAMP,
+        "lastChanged" to ServerValue.TIMESTAMP
+    )
+
+    private fun DataSnapshot.isPresenceOnline(): Boolean {
+        val boolFlag = child("online").getValue(Boolean::class.java)
+        if (boolFlag != null) return boolFlag
+        return child("status").getValue(String::class.java) == "online"
     }
 
     private fun resolveDatabase(databaseUrl: String): FirebaseDatabase? {

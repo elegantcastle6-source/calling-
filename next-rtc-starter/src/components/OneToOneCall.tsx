@@ -115,16 +115,16 @@ export default function OneToOneCall() {
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [signalQuality, setSignalQuality] = useState<SignalQualityUi>(UNKNOWN_SIGNAL);
-  const [remotePeer, setRemotePeer] = useState<RemotePeerState | null>(null);
+  const [remotePeers, setRemotePeers] = useState<RemotePeerState[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
 
   const clientRef = useRef<IAgoraRTCClient | null>(null);
   const localAudioRef = useRef<IMicrophoneAudioTrack | null>(null);
   const localVideoRef = useRef<ICameraVideoTrack | null>(null);
-  const remoteUserRef = useRef<IAgoraRTCRemoteUser | null>(null);
+  const remoteUsersRef = useRef<Map<string, IAgoraRTCRemoteUser>>(new Map());
 
   const localPlayerRef = useRef<HTMLDivElement | null>(null);
-  const remotePlayerRef = useRef<HTMLDivElement | null>(null);
+  const remoteContainerRef = useRef<HTMLDivElement | null>(null);
   const activeChannelRef = useRef<string>("");
   const activeUidRef = useRef<number>(0);
   const logSeqRef = useRef<number>(1);
@@ -206,10 +206,11 @@ export default function OneToOneCall() {
         const reason = err instanceof Error ? err.message : String(err);
         addLog(`Cleanup warning: ${reason}`, "warn");
       } finally {
-        remoteUserRef.current = null;
+        remoteUsersRef.current.clear();
+        remoteContainerRef.current?.replaceChildren();
         activeChannelRef.current = "";
         activeUidRef.current = 0;
-        setRemotePeer(null);
+        setRemotePeers([]);
         setJoinedUid(null);
         setMicMuted(false);
         setCameraOff(false);
@@ -233,12 +234,26 @@ export default function OneToOneCall() {
     };
   }, [cleanupCall]);
 
-  // Replay remote video whenever the remote container mounts/updates with active video.
-  useEffect(() => {
-    if (remotePeer?.hasVideo && remoteUserRef.current?.videoTrack) {
-      remoteUserRef.current.videoTrack.play(remotePlayerRef.current ?? "remote-video");
+  const ensureRemotePlayerElement = useCallback((uid: UID): HTMLElement | null => {
+    const elementId = `remote-${uid}`;
+    let el = document.getElementById(elementId);
+    if (!el) {
+      const container = remoteContainerRef.current ?? document.getElementById("remote-container");
+      if (!container) return null;
+      el = document.createElement("div");
+      el.id = elementId;
+      el.className = "remote-player-slot";
+      el.style.width = "100%";
+      el.style.height = "100%";
+      el.style.minHeight = "300px";
+      container.appendChild(el);
     }
-  }, [remotePeer]);
+    return el;
+  }, []);
+
+  const removeRemotePlayerElement = useCallback((uid: UID) => {
+    document.getElementById(`remote-${uid}`)?.remove();
+  }, []);
 
   const handleCopyInviteLink = async () => {
     const cleanChannel = channelName.trim() || DEFAULT_CHANNEL;
@@ -255,12 +270,17 @@ export default function OneToOneCall() {
   };
 
   const handleResumeAutoplay = () => {
-    if (remoteUserRef.current?.audioTrack) {
-      remoteUserRef.current.audioTrack.play();
-    }
-    if (remoteUserRef.current?.videoTrack) {
-      remoteUserRef.current.videoTrack.play(remotePlayerRef.current ?? "remote-video");
-    }
+    remoteUsersRef.current.forEach((remoteUser) => {
+      if (remoteUser.audioTrack) {
+        remoteUser.audioTrack.play();
+      }
+      if (remoteUser.videoTrack) {
+        const el = ensureRemotePlayerElement(remoteUser.uid);
+        if (el) {
+          remoteUser.videoTrack.play(el);
+        }
+      }
+    });
     setAutoplayBlocked(false);
     addLog("Resumed remote media playback after browser autoplay prompt.", "info");
   };
@@ -338,11 +358,15 @@ export default function OneToOneCall() {
         console.log("Remote user published:", user.uid, mediaType);
         try {
           await client.subscribe(user, mediaType);
-          remoteUserRef.current = user;
+          console.log("subscribed", user.uid, mediaType);
+          remoteUsersRef.current.set(String(user.uid), user);
 
           if (mediaType === "video" && user.videoTrack) {
-            user.videoTrack.play(remotePlayerRef.current ?? "remote-video");
-            console.log("Remote video is playing");
+            const el = ensureRemotePlayerElement(user.uid);
+            if (el) {
+              user.videoTrack.play(el);
+              console.log("Remote video is playing");
+            }
             addLog(`Subscribed to remote video from UID ${user.uid}.`, "info");
           }
           if (mediaType === "audio" && user.audioTrack) {
@@ -351,11 +375,17 @@ export default function OneToOneCall() {
             addLog(`Subscribed to remote audio from UID ${user.uid}.`, "info");
           }
 
-          setRemotePeer((prev) => ({
-            uid: user.uid,
-            hasVideo: mediaType === "video" ? true : prev?.uid === user.uid ? prev.hasVideo : false,
-            hasAudio: mediaType === "audio" ? true : prev?.uid === user.uid ? prev.hasAudio : false
-          }));
+          setRemotePeers((prev) => {
+            const existing = prev.find((p) => p.uid === user.uid);
+            const updated: RemotePeerState = {
+              uid: user.uid,
+              hasVideo: mediaType === "video" ? true : (existing?.hasVideo ?? false),
+              hasAudio: mediaType === "audio" ? true : (existing?.hasAudio ?? false)
+            };
+            return existing
+              ? prev.map((p) => (p.uid === user.uid ? updated : p))
+              : [...prev, updated];
+          });
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
           console.error("Failed to subscribe to remote user:", user.uid, mediaType, err);
@@ -370,25 +400,28 @@ export default function OneToOneCall() {
         }
         if (mediaType === "video") {
           user.videoTrack?.stop();
+          removeRemotePlayerElement(user.uid);
         }
-        setRemotePeer((prev) => {
-          if (!prev || prev.uid !== user.uid) return prev;
-          return {
-            ...prev,
-            hasVideo: mediaType === "video" ? false : prev.hasVideo,
-            hasAudio: mediaType === "audio" ? false : prev.hasAudio
-          };
-        });
+        setRemotePeers((prev) =>
+          prev.map((p) =>
+            p.uid !== user.uid
+              ? p
+              : {
+                  ...p,
+                  hasVideo: mediaType === "video" ? false : p.hasVideo,
+                  hasAudio: mediaType === "audio" ? false : p.hasAudio
+                }
+          )
+        );
         addLog(`Remote UID ${user.uid} muted or stopped ${mediaType}.`, "info");
       });
 
       client.on("user-left", (user: IAgoraRTCRemoteUser) => {
         user.audioTrack?.stop();
         user.videoTrack?.stop();
-        if (remoteUserRef.current?.uid === user.uid) {
-          remoteUserRef.current = null;
-          setRemotePeer(null);
-        }
+        removeRemotePlayerElement(user.uid);
+        remoteUsersRef.current.delete(String(user.uid));
+        setRemotePeers((prev) => prev.filter((p) => p.uid !== user.uid));
         addLog(`Remote UID ${user.uid} left the channel.`, "info");
       });
 
@@ -443,10 +476,12 @@ export default function OneToOneCall() {
       localVideoRef.current = camTrack;
       setHasLocalCamera(camTrack !== null);
 
-      await client.publish(camTrack ? [micTrack, camTrack] : [micTrack]);
       if (camTrack) {
         camTrack.play(localPlayerRef.current ?? "local-video");
       }
+
+      await client.publish(camTrack ? [micTrack, camTrack] : [micTrack]);
+      console.log(camTrack ? "published mic + camera" : "published mic (audio-only)");
       setMicMuted(false);
       setCameraOff(camTrack === null);
       setStatus("connected");
@@ -596,18 +631,20 @@ export default function OneToOneCall() {
         </div>
 
         <div className="video-tile">
-          <div id="remote-video" ref={remotePlayerRef} className="video-canvas" />
-          {!remotePeer?.hasVideo && (
+          <div id="remote-container" ref={remoteContainerRef} className="remote-container" />
+          {remotePeers.every((p) => !p.hasVideo) && (
             <div className="video-placeholder">
-              {remotePeer
-                ? `Peer UID ${remotePeer.uid} connected (camera off)`
+              {remotePeers.length > 0
+                ? `Peer UID ${remotePeers[0].uid} connected (camera off)`
                 : "Waiting for second participant to join the same channel with a different UID…"}
             </div>
           )}
           <div className="video-label">
-            {remotePeer
-              ? `Peer (UID ${remotePeer.uid}) · ${remotePeer.hasAudio ? "Audio Playing" : "Audio Muted"}`
-              : "Remote Participant"}
+            {remotePeers.length === 1
+              ? `Peer (UID ${remotePeers[0].uid}) · ${remotePeers[0].hasAudio ? "Audio Playing" : "Audio Muted"}`
+              : remotePeers.length > 1
+                ? `${remotePeers.length} Remote Participants`
+                : "Remote Participant"}
           </div>
         </div>
       </section>
