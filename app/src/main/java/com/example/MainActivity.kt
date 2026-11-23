@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.widget.Toast
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -63,6 +65,7 @@ import com.example.ui.screens.MainDashboardScreen
 import com.example.ui.screens.SearchUserScreen
 import com.example.ui.theme.MyApplicationTheme
 import com.example.utils.CallRingtonePlayer
+import com.example.utils.JustChatNotifications
 import com.example.viewmodel.JustChatViewModel
 import com.example.viewmodel.UiState
 import com.google.firebase.Firebase
@@ -74,6 +77,7 @@ import com.justchat.app.sync.JustChatManager
 class MainActivity : ComponentActivity() {
 
     private var screenOffReceiverRegistered = false
+    private val pendingNotificationChatEmail = mutableStateOf<String?>(null)
 
     private val screenOffReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -87,6 +91,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        JustChatNotifications.createChannels(applicationContext)
+        pendingNotificationChatEmail.value =
+            intent?.getStringExtra(JustChatNotifications.EXTRA_CONTACT_EMAIL)
 
         ContextCompat.registerReceiver(
             this,
@@ -102,8 +110,20 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MyApplicationTheme {
-                JustChatApp()
+                JustChatApp(
+                    pendingNotificationChatEmail = pendingNotificationChatEmail.value,
+                    onConsumeNotificationChatEmail = { pendingNotificationChatEmail.value = null }
+                )
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val contactEmail = intent.getStringExtra(JustChatNotifications.EXTRA_CONTACT_EMAIL)
+        if (!contactEmail.isNullOrBlank()) {
+            pendingNotificationChatEmail.value = contactEmail
         }
     }
 
@@ -141,7 +161,10 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun JustChatApp() {
+fun JustChatApp(
+    pendingNotificationChatEmail: String? = null,
+    onConsumeNotificationChatEmail: () -> Unit = {}
+) {
     val auth = remember { Firebase.auth }
     val authFlow = remember(auth) { auth.authStateFlow() }
     val currentUser by authFlow.collectAsStateWithLifecycle(initialValue = auth.currentUser)
@@ -159,6 +182,8 @@ fun JustChatApp() {
                 AuthenticatedJustChatContent(
                     firebaseUser = signedInUser,
                     sessionKey = sessionKey,
+                    pendingNotificationChatEmail = pendingNotificationChatEmail,
+                    onConsumeNotificationChatEmail = onConsumeNotificationChatEmail,
                     onSessionEnded = { sessionGeneration += 1 }
                 )
             }
@@ -170,11 +195,28 @@ fun JustChatApp() {
 private fun AuthenticatedJustChatContent(
     firebaseUser: FirebaseUser,
     sessionKey: String,
+    pendingNotificationChatEmail: String?,
+    onConsumeNotificationChatEmail: () -> Unit,
     onSessionEnded: () -> Unit
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { /* Permission result handled by system notification settings */ }
+
+    LaunchedEffect(sessionKey) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     val viewModel: JustChatViewModel = viewModel(
         key = sessionKey,
@@ -191,7 +233,26 @@ private fun AuthenticatedJustChatContent(
                     callSignaling = CallSignaling(db),
                     agoraController = AgoraCallController(app.applicationContext),
                     currentUserId = firebaseUser.uid,
-                    initialUser = firebaseUser
+                    initialUser = firebaseUser,
+                    onIncomingMessageAlert = { contact, message ->
+                        JustChatNotifications.showIncomingMessageNotification(
+                            context = app.applicationContext,
+                            senderName = contact.name,
+                            senderEmail = contact.gmail,
+                            messageText = message.text
+                        )
+                    },
+                    onIncomingCallAlert = { call ->
+                        JustChatNotifications.showIncomingCallNotification(
+                            context = app.applicationContext,
+                            callerName = call.contact.name,
+                            callerEmail = call.contact.gmail,
+                            isVideo = call.callType == CallType.VIDEO
+                        )
+                    },
+                    onCancelCallAlert = {
+                        JustChatNotifications.cancelIncomingCallNotification(app.applicationContext)
+                    }
                 )
             }
         }
@@ -205,6 +266,17 @@ private fun AuthenticatedJustChatContent(
     val activeCall by viewModel.activeCall.collectAsStateWithLifecycle()
     val actionError by viewModel.actionError.collectAsStateWithLifecycle()
     val userSearchState by viewModel.userSearchState.collectAsStateWithLifecycle()
+
+    LaunchedEffect(pendingNotificationChatEmail, contactsState) {
+        val targetEmail = pendingNotificationChatEmail?.trim().orEmpty()
+        if (targetEmail.isEmpty()) return@LaunchedEffect
+        val contacts = (contactsState as? UiState.Success)?.data ?: return@LaunchedEffect
+        val matched = contacts.firstOrNull { it.gmail.equals(targetEmail, ignoreCase = true) }
+        if (matched != null) {
+            viewModel.selectContact(matched)
+        }
+        onConsumeNotificationChatEmail()
+    }
 
     // Ring once per incoming call; silencing via power/volume buttons will not restart ringing on wake.
     val incomingRingingCallId = activeCall

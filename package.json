@@ -1,0 +1,11 @@
+{
+  "name": "agora-token-server",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "agora-token": "^2.0.3"
+  }
+}

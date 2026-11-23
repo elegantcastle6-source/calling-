@@ -20,11 +20,15 @@ function isPlaceholder(value: string): boolean {
  */
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const channelName = (searchParams.get("channelName") ?? "").trim();
+  const channelName = (
+    searchParams.get("channelName") ??
+    searchParams.get("channel") ??
+    ""
+  ).trim();
 
   if (!channelName || channelName.length > 64 || !/^[a-zA-Z0-9_-]+$/.test(channelName)) {
     return NextResponse.json(
-      { error: "A valid channelName (1-64 alphanumeric, underscore, or hyphen chars) is required." },
+      { error: "A valid channelName or channel (1-64 alphanumeric, underscore, or hyphen chars) is required." },
       { status: 400 }
     );
   }
@@ -43,7 +47,11 @@ export async function GET(request: Request) {
   }
 
   const appId = (process.env.AGORA_APP_ID ?? process.env.NEXT_PUBLIC_AGORA_APP_ID ?? "").trim();
-  const appCertificate = (process.env.AGORA_APP_CERTIFICATE ?? "").trim();
+  const appCertificate = (
+    process.env.AGORA_APP_CERTIFICATE ??
+    process.env.AGORA_APP_CERT ??
+    ""
+  ).trim();
 
   if (isPlaceholder(appId)) {
     return NextResponse.json(

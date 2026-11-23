@@ -69,7 +69,10 @@ class JustChatViewModel(
     private val callSignaling: CallSignaling,
     private val agoraController: AgoraCallController,
     private val currentUserId: String,
-    initialUser: FirebaseUser
+    initialUser: FirebaseUser,
+    private val onIncomingMessageAlert: (User, ChatMessage) -> Unit = { _, _ -> },
+    private val onIncomingCallAlert: (ActiveCallState) -> Unit = {},
+    private val onCancelCallAlert: () -> Unit = {}
 ) : ViewModel() {
 
     private val _selectedContact = MutableStateFlow<User?>(null)
@@ -108,6 +111,8 @@ class JustChatViewModel(
     private val deliveryJobsByEmail = mutableMapOf<String, Job>()
     private val acknowledgedDeliveredIds = mutableSetOf<String>()
     private val acknowledgedReadIds = mutableSetOf<String>()
+    private val initializedDeliveryRooms = mutableSetOf<String>()
+    private val notifiedMessageIds = mutableSetOf<String>()
 
     val fallbackUser: User = User(
         id = currentUserId,
@@ -288,7 +293,7 @@ class JustChatViewModel(
         activeCallRoomId = invite.chatRoomId
         activeInviteUpdatedAtMs = invite.updatedAtMillis
 
-        _activeCall.value = ActiveCallState(
+        val incomingState = ActiveCallState(
             callId = callId,
             contact = callerContact,
             callType = type,
@@ -307,6 +312,8 @@ class JustChatViewModel(
             isAgoraConfigured = agoraConfigured,
             connectionNote = if (agoraConfigured) null else MISSING_AGORA_NOTE
         )
+        _activeCall.value = incomingState
+        onIncomingCallAlert(incomingState)
 
         callSignalingJob?.cancel()
         callSignalingJob = viewModelScope.launch {
@@ -418,10 +425,13 @@ class JustChatViewModel(
         cancelDeliveryReceiptObservers()
         acknowledgedDeliveredIds.clear()
         acknowledgedReadIds.clear()
+        initializedDeliveryRooms.clear()
+        notifiedMessageIds.clear()
         JustChatManager.stopPresenceTracking()
         searchJob?.cancel()
         _userSearchState.value = UserSearchUiState.Idle
         CallRingtonePlayer.stopRingtone()
+        onCancelCallAlert()
         endCall(persistLog = false, notifySignaling = false)
         _selectedContact.value = null
     }
@@ -491,6 +501,23 @@ class JustChatViewModel(
                         val isChatOpen = _selectedContact.value?.gmail
                             ?.trim()
                             ?.equals(email, ignoreCase = true) == true
+                        if (email !in initializedDeliveryRooms) {
+                            initializedDeliveryRooms.add(email)
+                            messages.forEach { msg ->
+                                if (msg.id.isNotBlank()) notifiedMessageIds.add(msg.id)
+                            }
+                        } else if (!isChatOpen) {
+                            val newIncoming = messages.filter { msg ->
+                                msg.senderId != "current_user" &&
+                                    msg.status != MessageStatus.READ &&
+                                    msg.id.isNotBlank() &&
+                                    msg.id !in notifiedMessageIds
+                            }
+                            if (newIncoming.isNotEmpty()) {
+                                newIncoming.forEach { notifiedMessageIds.add(it.id) }
+                                onIncomingMessageAlert(contact, newIncoming.last())
+                            }
+                        }
                         if (!isChatOpen) {
                             markIncomingMessagesAsDelivered(contact, messages)
                         }
@@ -730,7 +757,7 @@ class JustChatViewModel(
         val channelName = CallSignaling.buildCallChannelName(chatRoomId, myEmail, contact.gmail)
         val agoraConfigured = agoraController.isConfigured
 
-        _activeCall.value = ActiveCallState(
+        val incomingState = ActiveCallState(
             callId = UUID.randomUUID().toString(),
             contact = contact,
             callType = type,
@@ -749,12 +776,15 @@ class JustChatViewModel(
             isAgoraConfigured = agoraConfigured,
             connectionNote = if (agoraConfigured) null else MISSING_AGORA_NOTE
         )
+        _activeCall.value = incomingState
+        onIncomingCallAlert(incomingState)
     }
 
     fun answerCall() {
         val current = _activeCall.value ?: return
         if (current.status != CallStatus.INCOMING_RINGING) return
         CallRingtonePlayer.stopRingtone()
+        onCancelCallAlert()
 
         val roomId = activeCallRoomId
         if (roomId != null) {
@@ -829,6 +859,7 @@ class JustChatViewModel(
 
     fun endCall(persistLog: Boolean = true, notifySignaling: Boolean = true) {
         CallRingtonePlayer.stopRingtone()
+        onCancelCallAlert()
         callTickerJob?.cancel()
         callSignalingJob?.cancel()
         agoraController.leaveCall()
@@ -966,6 +997,7 @@ class JustChatViewModel(
     override fun onCleared() {
         super.onCleared()
         CallRingtonePlayer.stopRingtone()
+        onCancelCallAlert()
         callTickerJob?.cancel()
         callSignalingJob?.cancel()
         incomingCallsJob?.cancel()

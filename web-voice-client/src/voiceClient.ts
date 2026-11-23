@@ -297,6 +297,7 @@ export class AgoraWebVoiceClient {
   ): Promise<string> {
     const url = new URL(baseUrl);
     url.searchParams.set("channelName", channelName);
+    url.searchParams.set("channel", channelName);
     url.searchParams.set("uid", String(uid));
     url.searchParams.set("role", "publisher");
 

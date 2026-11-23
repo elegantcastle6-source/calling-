@@ -14,6 +14,7 @@ import (
 )
 
 type tokenResponse struct {
+	Token       string `json:"token"`
 	RtcToken    string `json:"rtcToken"`
 	ChannelName string `json:"channelName"`
 	Uid         uint32 `json:"uid"`
@@ -30,8 +31,11 @@ func main() {
 
 	appId := strings.TrimSpace(os.Getenv("AGORA_APP_ID"))
 	appCertificate := strings.TrimSpace(os.Getenv("AGORA_APP_CERTIFICATE"))
+	if appCertificate == "" {
+		appCertificate = strings.TrimSpace(os.Getenv("AGORA_APP_CERT"))
+	}
 	if appId == "" || appCertificate == "" {
-		log.Fatal("Need to set environment variables AGORA_APP_ID and AGORA_APP_CERTIFICATE")
+		log.Fatal("Need to set environment variables AGORA_APP_ID and AGORA_APP_CERTIFICATE (or AGORA_APP_CERT)")
 	}
 
 	const tokenExpirationInSeconds = uint32(3600)
@@ -70,7 +74,7 @@ func main() {
 		allowedOrigin = "*"
 	}
 
-	mux.HandleFunc("/rtc-token", func(w http.ResponseWriter, r *http.Request) {
+	tokenHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
@@ -84,8 +88,11 @@ func main() {
 		}
 
 		channelName := strings.TrimSpace(r.URL.Query().Get("channelName"))
+		if channelName == "" {
+			channelName = strings.TrimSpace(r.URL.Query().Get("channel"))
+		}
 		if channelName == "" || len(channelName) > 64 {
-			http.Error(w, "valid channelName query parameter is required", http.StatusBadRequest)
+			http.Error(w, "valid channelName or channel query parameter is required", http.StatusBadRequest)
 			return
 		}
 
@@ -121,13 +128,16 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(tokenResponse{
+			Token:       token,
 			RtcToken:    token,
 			ChannelName: channelName,
 			Uid:         uid,
 			Role:        strings.ToLower(roleParam),
 			ExpiresIn:   tokenExpirationInSeconds,
 		})
-	})
+	}
+	mux.HandleFunc("/rtc-token", tokenHandler)
+	mux.HandleFunc("/token", tokenHandler)
 
 	log.Printf("Just Chat Agora RTC token server listening on :%s", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {

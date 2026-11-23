@@ -26,7 +26,8 @@ interface LogEntry {
 }
 
 interface TokenApiResponse {
-  token: string | null;
+  token?: string | null;
+  rtcToken?: string | null;
   appId?: string;
   mode?: "secured" | "testing";
   error?: string;
@@ -153,18 +154,29 @@ export default function OneToOneCall() {
 
   const fetchServerToken = useCallback(
     async (channel: string, uid: number): Promise<TokenApiResponse> => {
+      const configuredEndpoint = (process.env.NEXT_PUBLIC_AGORA_TOKEN_SERVER_URL ?? "").trim();
+      const baseEndpoint =
+        configuredEndpoint && !configuredEndpoint.startsWith("OPTIONAL_") && !configuredEndpoint.startsWith("YOUR_")
+          ? configuredEndpoint
+          : "/api/rtc-token";
       const params = new URLSearchParams({
         channelName: channel,
+        channel,
         uid: String(uid)
       });
-      const res = await fetch(`/api/rtc-token?${params.toString()}`, {
+      const separator = baseEndpoint.includes("?") ? "&" : "?";
+      const res = await fetch(`${baseEndpoint}${separator}${params.toString()}`, {
         cache: "no-store"
       });
       const payload = (await res.json()) as TokenApiResponse;
       if (!res.ok) {
         throw new Error(payload.error || `Token route returned HTTP ${res.status}`);
       }
-      return payload;
+      const normalizedToken = payload.token ?? payload.rtcToken ?? null;
+      return {
+        ...payload,
+        token: normalizedToken
+      };
     },
     []
   );
@@ -223,8 +235,8 @@ export default function OneToOneCall() {
 
   // Replay remote video whenever the remote container mounts/updates with active video.
   useEffect(() => {
-    if (remotePeer?.hasVideo && remoteUserRef.current?.videoTrack && remotePlayerRef.current) {
-      remoteUserRef.current.videoTrack.play(remotePlayerRef.current);
+    if (remotePeer?.hasVideo && remoteUserRef.current?.videoTrack) {
+      remoteUserRef.current.videoTrack.play(remotePlayerRef.current ?? "remote-video");
     }
   }, [remotePeer]);
 
@@ -246,8 +258,8 @@ export default function OneToOneCall() {
     if (remoteUserRef.current?.audioTrack) {
       remoteUserRef.current.audioTrack.play();
     }
-    if (remoteUserRef.current?.videoTrack && remotePlayerRef.current) {
-      remoteUserRef.current.videoTrack.play(remotePlayerRef.current);
+    if (remoteUserRef.current?.videoTrack) {
+      remoteUserRef.current.videoTrack.play(remotePlayerRef.current ?? "remote-video");
     }
     setAutoplayBlocked(false);
     addLog("Resumed remote media playback after browser autoplay prompt.", "info");
@@ -280,15 +292,15 @@ export default function OneToOneCall() {
       let resolvedToken: string | null = manualToken.length > 0 ? manualToken : null;
 
       if (!resolvedToken) {
-        addLog("Requesting RTC token from /api/rtc-token...", "info");
+        addLog("Requesting RTC token from token endpoint...", "info");
         const tokenResp = await fetchServerToken(cleanChannel, tokenRequestUid);
-        resolvedToken = tokenResp.token;
+        resolvedToken = tokenResp.token ?? null;
         if (tokenResp.appId) {
           appId = tokenResp.appId;
         }
         addLog(
-          tokenResp.mode === "secured"
-            ? "Received server-signed AccessToken2 (RolePublisher)."
+          resolvedToken
+            ? "Received server-signed RTC token (RolePublisher)."
             : "App Certificate not set; joining in Testing Mode (no token).",
           "info"
         );
@@ -328,11 +340,9 @@ export default function OneToOneCall() {
           await client.subscribe(user, mediaType);
           remoteUserRef.current = user;
 
-          if (mediaType === "video") {
-            if (remotePlayerRef.current && user.videoTrack) {
-              user.videoTrack.play(remotePlayerRef.current);
-              console.log("Remote video is playing");
-            }
+          if (mediaType === "video" && user.videoTrack) {
+            user.videoTrack.play(remotePlayerRef.current ?? "remote-video");
+            console.log("Remote video is playing");
             addLog(`Subscribed to remote video from UID ${user.uid}.`, "info");
           }
           if (mediaType === "audio" && user.audioTrack) {
@@ -433,11 +443,10 @@ export default function OneToOneCall() {
       localVideoRef.current = camTrack;
       setHasLocalCamera(camTrack !== null);
 
-      if (camTrack && localPlayerRef.current) {
-        camTrack.play(localPlayerRef.current);
-      }
-
       await client.publish(camTrack ? [micTrack, camTrack] : [micTrack]);
+      if (camTrack) {
+        camTrack.play(localPlayerRef.current ?? "local-video");
+      }
       setMicMuted(false);
       setCameraOff(camTrack === null);
       setStatus("connected");
@@ -571,7 +580,7 @@ export default function OneToOneCall() {
 
       <section className="video-grid">
         <div className="video-tile">
-          <div ref={localPlayerRef} className="video-canvas" />
+          <div id="local-video" ref={localPlayerRef} className="video-canvas" />
           {(!inCall || cameraOff) && (
             <div className="video-placeholder">
               {inCall
@@ -587,7 +596,7 @@ export default function OneToOneCall() {
         </div>
 
         <div className="video-tile">
-          <div ref={remotePlayerRef} className="video-canvas" />
+          <div id="remote-video" ref={remotePlayerRef} className="video-canvas" />
           {!remotePeer?.hasVideo && (
             <div className="video-placeholder">
               {remotePeer

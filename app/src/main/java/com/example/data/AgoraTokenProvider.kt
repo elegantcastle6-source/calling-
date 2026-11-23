@@ -23,6 +23,7 @@ private interface AgoraTokenApi {
     suspend fun fetchRtcToken(
         @Url endpointUrl: String,
         @Query("channelName") channelName: String,
+        @Query("channel") channel: String,
         @Query("uid") uid: Int,
         @Query("role") role: String,
         @Header("Authorization") authorization: String?
@@ -82,6 +83,7 @@ class AgoraTokenProvider(
             val response = api.fetchRtcToken(
                 endpointUrl = serverUrl,
                 channelName = cleanChannel,
+                channel = cleanChannel,
                 uid = uid,
                 role = role,
                 authorization = authHeader

@@ -25,3 +25,12 @@ next-rtc-starter/node_modules
 next-rtc-starter/.next
 next-rtc-starter/.env
 next-rtc-starter/.env.local
+agora-token/node_modules
+agora-token/.env
+agora-token/.env.local
+agora-token/.vercel
+/node_modules
+/.env.local
+/.vercel
+
+

@@ -43,4 +43,15 @@
     <string name="network_quality_poor">Weak</string>
     <string name="network_quality_disconnected">Unstable</string>
     <string name="network_quality_cd">Connection stability: %1$s</string>
+    <string name="settings_ringtone_title">Incoming Call Ringtone</string>
+    <string name="settings_ringtone_subtitle">Play ringtone for incoming calls</string>
+    <string name="settings_ringtone_sound_title">Ringtone Sound</string>
+    <string name="settings_ringtone_change">Change</string>
+    <string name="settings_ringtone_muted">Muted</string>
+    <string name="notification_channel_messages_name">Messages &amp; Alerts</string>
+    <string name="notification_channel_messages_desc">Popup notifications for incoming chat messages</string>
+    <string name="notification_channel_calls_name">Incoming Calls</string>
+    <string name="notification_channel_calls_desc">Incoming voice call alerts</string>
+    <string name="notification_incoming_voice_call">Incoming voice call</string>
+    <string name="notification_incoming_video_call">Incoming video call</string>
 </resources>

@@ -84,6 +84,7 @@ import androidx.compose.ui.unit.dp
 import com.example.model.CallLogItem
 import com.example.model.CallType
 import com.example.model.User
+import com.example.ui.components.CallRingtoneSettingSection
 import com.example.ui.components.UserAvatar
 import com.example.ui.theme.CallGreen
 import com.example.ui.theme.CallRed
@@ -873,6 +874,8 @@ private fun DashboardSettingsDialog(
                         modifier = Modifier.testTag("settings_low_latency_switch")
                     )
                 }
+
+                CallRingtoneSettingSection()
 
                 Row(
                     modifier = Modifier
