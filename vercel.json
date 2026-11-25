@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "next-rtc-starter": {
+      "root": "next-rtc-starter",
+      "framework": "nextjs"
+    },
+    "token-server": {
+      "root": "token-server",
+      "runtime": "go"
+    },
+    "web-voice-client": {
+      "root": "web-voice-client",
+      "framework": "vite"
+    }
+  },
+  "rewrites": []
+}
