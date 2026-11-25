@@ -46,7 +46,13 @@ export async function GET(request: Request) {
     uid = parsed;
   }
 
-  const appId = (process.env.AGORA_APP_ID ?? process.env.NEXT_PUBLIC_AGORA_APP_ID ?? "").trim();
+  const appId = (
+    process.env.APP_ID ??
+    process.env.AGORA_APP_ID ??
+    process.env.NEXT_PUBLIC_APP_ID ??
+    process.env.NEXT_PUBLIC_AGORA_APP_ID ??
+    ""
+  ).trim();
   const appCertificate = (
     process.env.AGORA_APP_CERTIFICATE ??
     process.env.AGORA_APP_CERT ??

@@ -98,14 +98,13 @@ data class ActiveCallState(
 
 /**
  * Self-contained real-time chat + Agora voice call container backed by [JustChatManager]
- * and securely injected [BuildConfig.AGORA_APP_ID] / [BuildConfig.AGORA_TEMP_TOKEN].
+ * and securely injected [BuildConfig.AGORA_APP_ID] / [BuildConfig.AGORA_TOKEN_SERVER_URL].
  */
 @Composable
 fun ChatAndCallContainer(
     friendName: String,
     friendEmail: String,
     friendUid: String = "",
-    agoraToken: String? = null,
     onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -279,7 +278,6 @@ fun ChatAndCallContainer(
         AgoraVoiceCallScreen(
             peerName = friendName,
             channelName = currentActiveCall.channelName,
-            agoraToken = agoraToken,
             onEndCall = {
                 JustChatManager.endCall(friendEmail)
                 activeCall = null
@@ -697,14 +695,12 @@ fun MessageTickIcon(
 fun CombinedCallScreen(
     peerName: String,
     channelName: String,
-    agoraToken: String?,
     onEndCall: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     AgoraVoiceCallScreen(
         peerName = peerName,
         channelName = channelName,
-        agoraToken = agoraToken,
         onEndCall = onEndCall,
         modifier = modifier
     )

@@ -41,13 +41,12 @@ interface AgoraCallListener {
  * for real-time voice calls.
  *
  * Credentials and optional channel overrides are injected securely via
- * [BuildConfig.AGORA_APP_ID], [BuildConfig.AGORA_TEMP_TOKEN], and
+ * [BuildConfig.AGORA_APP_ID], [BuildConfig.AGORA_TOKEN_SERVER_URL], and
  * [BuildConfig.AGORA_CHANNEL_NAME] from the AI Studio Secrets panel.
  */
 class AgoraCallController(
     context: Context,
     private val myAppId: String = BuildConfig.AGORA_APP_ID.trim(),
-    private val token: String = BuildConfig.AGORA_TEMP_TOKEN.trim(),
     private val configuredChannelName: String = BuildConfig.AGORA_CHANNEL_NAME.trim(),
     private val tokenProvider: AgoraTokenProvider = AgoraTokenProvider()
 ) {
@@ -79,6 +78,12 @@ class AgoraCallController(
 
     @Volatile
     private var renewalJob: Job? = null
+
+    @Volatile
+    private var lastSpeakerDefault: Boolean = true
+
+    @Volatile
+    private var lastLowDataMode: Boolean = true
 
     val isConfigured: Boolean
         get() = isValidAppId(myAppId)
@@ -184,7 +189,7 @@ class AgoraCallController(
 
         override fun onRequestToken() {
             super.onRequestToken()
-            renewDynamicTokenIfConfigured()
+            rejoinWithFreshToken()
         }
     }
 
@@ -202,12 +207,69 @@ class AgoraCallController(
                 synchronized(lock) {
                     if (activeChannelName == channel) {
                         runCatching { mRtcEngine?.renewToken(freshToken) }
-                            .onFailure { Log.w(TAG, "Failed to renew Agora RTC token", it) }
+                            .onFailure { err ->
+                                Log.w(TAG, "Failed to renew Agora RTC token", err)
+                                runOnMainThread {
+                                    activeListener?.onError(
+                                        Constants.ERR_INVALID_TOKEN,
+                                        "Token renewal failed: ${err.localizedMessage ?: "unknown error"}"
+                                    )
+                                }
+                            }
                     }
                 }
             }.onFailure { err ->
                 if (err is CancellationException) throw err
                 Log.w(TAG, "Unable to refresh Agora RTC token: ${err.message}")
+                runOnMainThread {
+                    activeListener?.onError(
+                        Constants.ERR_INVALID_TOKEN,
+                        "Unable to refresh Agora token: ${err.localizedMessage ?: "server unreachable"}"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun rejoinWithFreshToken() {
+        val channel = activeChannelName
+        val uid = activeUid
+        val listener = activeListener ?: return
+        if (!tokenProvider.isConfigured || channel.isBlank()) {
+            runOnMainThread {
+                listener.onError(
+                    Constants.ERR_TOKEN_EXPIRED,
+                    "Agora token expired and AGORA_TOKEN_SERVER_URL is not configured."
+                )
+            }
+            return
+        }
+        renewalJob?.cancel()
+        renewalJob = tokenScope.launch {
+            tokenProvider.fetchToken(
+                channelName = channel,
+                uid = uid,
+                role = AgoraTokenProvider.ROLE_PUBLISHER
+            ).onSuccess { freshToken ->
+                if (activeListener === listener) {
+                    joinCallWithToken(
+                        resolvedChannel = channel,
+                        resolvedToken = freshToken,
+                        uid = uid,
+                        isSpeakerDefault = lastSpeakerDefault,
+                        isLowDataMode = lastLowDataMode,
+                        listener = listener
+                    )
+                }
+            }.onFailure { err ->
+                if (err is CancellationException) throw err
+                Log.e(TAG, "Unable to fetch fresh Agora RTC token for rejoin", err)
+                runOnMainThread {
+                    listener.onError(
+                        Constants.ERR_TOKEN_EXPIRED,
+                        "Unable to fetch fresh Agora token: ${err.localizedMessage ?: "server unreachable"}"
+                    )
+                }
             }
         }
     }
@@ -267,56 +329,53 @@ class AgoraCallController(
         }
 
         val resolvedChannel = resolveChannelName(configuredChannelName, channelName)
-        val staticToken = normalizeToken(token)
+        lastSpeakerDefault = isSpeakerDefault
+        lastLowDataMode = isLowDataMode
 
-        // When a dynamic token server URL is configured and no static token override is provided,
-        // fetch a short-lived RolePublisher RTC token asynchronously before joining.
-        if (staticToken == null && tokenProvider.isConfigured) {
-            synchronized(lock) {
-                tokenJob?.cancel()
-                activeListener = listener
-                activeChannelName = resolvedChannel
-                activeUid = uid
-                tokenJob = tokenScope.launch {
-                    val tokenResult = tokenProvider.fetchToken(
-                        channelName = resolvedChannel,
-                        uid = uid,
-                        role = AgoraTokenProvider.ROLE_PUBLISHER
-                    )
-                    tokenResult.onSuccess { dynamicToken ->
-                        if (activeListener === listener) {
-                            joinCallWithToken(
-                                resolvedChannel = resolvedChannel,
-                                resolvedToken = dynamicToken,
-                                uid = uid,
-                                isSpeakerDefault = isSpeakerDefault,
-                                isLowDataMode = isLowDataMode,
-                                listener = listener
-                            )
-                        }
-                    }.onFailure { err ->
-                        if (err is CancellationException) throw err
-                        Log.e(INIT_ERROR_TAG, "Failed to fetch dynamic Agora RTC token", err)
-                        runOnMainThread {
-                            listener.onError(
-                                Constants.ERR_INVALID_TOKEN,
-                                "Unable to fetch Agora token: ${err.localizedMessage ?: "server unreachable"}"
-                            )
-                        }
+        if (!tokenProvider.isConfigured) {
+            val message = "Missing AGORA_TOKEN_SERVER_URL in AI Studio Secrets."
+            Log.e(INIT_ERROR_TAG, message)
+            runOnMainThread {
+                listener.onError(Constants.ERR_INVALID_TOKEN, message)
+            }
+            return false
+        }
+
+        synchronized(lock) {
+            tokenJob?.cancel()
+            activeListener = listener
+            activeChannelName = resolvedChannel
+            activeUid = uid
+            tokenJob = tokenScope.launch {
+                val tokenResult = tokenProvider.fetchToken(
+                    channelName = resolvedChannel,
+                    uid = uid,
+                    role = AgoraTokenProvider.ROLE_PUBLISHER
+                )
+                tokenResult.onSuccess { dynamicToken ->
+                    if (activeListener === listener) {
+                        joinCallWithToken(
+                            resolvedChannel = resolvedChannel,
+                            resolvedToken = dynamicToken,
+                            uid = uid,
+                            isSpeakerDefault = isSpeakerDefault,
+                            isLowDataMode = isLowDataMode,
+                            listener = listener
+                        )
+                    }
+                }.onFailure { err ->
+                    if (err is CancellationException) throw err
+                    Log.e(INIT_ERROR_TAG, "Failed to fetch dynamic Agora RTC token", err)
+                    runOnMainThread {
+                        listener.onError(
+                            Constants.ERR_INVALID_TOKEN,
+                            "Unable to fetch Agora token: ${err.localizedMessage ?: "server unreachable"}"
+                        )
                     }
                 }
             }
-            return true
         }
-
-        return joinCallWithToken(
-            resolvedChannel = resolvedChannel,
-            resolvedToken = staticToken,
-            uid = uid,
-            isSpeakerDefault = isSpeakerDefault,
-            isLowDataMode = isLowDataMode,
-            listener = listener
-        )
+        return true
     }
 
     private fun joinCallWithToken(
@@ -528,7 +587,7 @@ class AgoraCallController(
                 "Invalid Agora App ID ($code). Check AGORA_APP_ID in AI Studio Secrets."
             Constants.ERR_TOKEN_EXPIRED,
             Constants.ERR_INVALID_TOKEN ->
-                "Agora token error ($code). Set AGORA_TEMP_TOKEN in AI Studio Secrets or enable Testing Mode in Agora Console."
+                "Agora token error ($code). Check AGORA_TOKEN_SERVER_URL in AI Studio Secrets."
             Constants.ERR_JOIN_CHANNEL_REJECTED ->
                 "Join channel rejected ($code)."
             Constants.ERR_INVALID_CHANNEL_NAME ->

@@ -80,19 +80,15 @@ import java.util.Locale
 fun AgoraVoiceCallScreen(
     peerName: String,
     channelName: String,
-    agoraToken: String? = null,
     onEndCall: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val resolvedToken = agoraToken?.trim().takeUnless { it.isNullOrEmpty() }
-        ?: BuildConfig.AGORA_TEMP_TOKEN.trim()
 
-    val agoraController = remember(context, resolvedToken) {
+    val agoraController = remember(context) {
         AgoraCallController(
             context = context.applicationContext,
             myAppId = BuildConfig.AGORA_APP_ID.trim(),
-            token = resolvedToken,
             configuredChannelName = BuildConfig.AGORA_CHANNEL_NAME.trim()
         )
     }

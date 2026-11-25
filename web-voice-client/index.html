@@ -26,6 +26,10 @@
         </div>
       </header>
 
+      <div id="error-banner" class="banner-error" role="alert" hidden>
+        <strong>Error:</strong> <span id="error-text"></span>
+      </div>
+
       <section class="card">
         <h2>Session Configuration</h2>
         <div class="grid">
@@ -37,17 +41,9 @@
             <span>Channel Name</span>
             <input id="channel-input" type="text" autocomplete="off" value="justchat_voice_room" placeholder="e.g. justchat_voice_room" />
           </label>
-          <label class="field">
-            <span>Optional Numeric RTC UID (leave blank to auto-assign)</span>
-            <input id="uid-input" type="number" min="0" step="1" placeholder="Auto-assign (null)" />
-          </label>
-          <label class="field">
-            <span>Console Temporary Token (matches channel + UID)</span>
-            <input id="token-input" type="password" autocomplete="off" placeholder="Paste Console Temp Token for this UID" />
-          </label>
           <label class="field field-full">
-            <span>Optional Token Server URL (for production dynamic tokens &amp; renewal)</span>
-            <input id="token-server-input" type="url" autocomplete="off" placeholder="https://your-token-server.example.com/rtc-token" />
+            <span>Token Server URL</span>
+            <input id="token-server-input" type="url" autocomplete="off" placeholder="https://your-token-server.example.com/api/token" />
           </label>
         </div>
 

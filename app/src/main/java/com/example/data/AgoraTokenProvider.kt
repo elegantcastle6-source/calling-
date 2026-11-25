@@ -143,8 +143,8 @@ class AgoraTokenProvider(
             if (trimmed.startsWith("{")) {
                 return runCatching {
                     val json = JSONObject(trimmed)
-                    val candidate = json.optString("rtcToken").ifBlank {
-                        json.optString("token")
+                    val candidate = json.optString("token").ifBlank {
+                        json.optString("rtcToken")
                     }.trim()
                     candidate.takeIf { it.isNotEmpty() }
                 }.getOrNull()

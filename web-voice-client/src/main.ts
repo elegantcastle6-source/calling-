@@ -17,9 +17,9 @@ function requireElement<T extends HTMLElement>(id: string): T {
 
 const appIdInput = requireElement<HTMLInputElement>("app-id-input");
 const channelInput = requireElement<HTMLInputElement>("channel-input");
-const uidInput = requireElement<HTMLInputElement>("uid-input");
-const tokenInput = requireElement<HTMLInputElement>("token-input");
 const tokenServerInput = requireElement<HTMLInputElement>("token-server-input");
+const errorBanner = requireElement<HTMLDivElement>("error-banner");
+const errorText = requireElement<HTMLSpanElement>("error-text");
 
 const joinButton = requireElement<HTMLButtonElement>("join-btn");
 const muteButton = requireElement<HTMLButtonElement>("mute-btn");
@@ -33,7 +33,6 @@ const localSummary = requireElement<HTMLParagraphElement>("local-summary");
 const remoteList = requireElement<HTMLUListElement>("remote-list");
 const logList = requireElement<HTMLUListElement>("event-log");
 
-// Pre-fill non-secret defaults from Vite env if present (never hardcode real credentials).
 const envAppId = (import.meta.env.VITE_AGORA_APP_ID ?? "").trim();
 if (envAppId && !envAppId.startsWith("YOUR_")) {
   appIdInput.value = envAppId;
@@ -47,8 +46,15 @@ if (envTokenServer) {
   tokenServerInput.value = envTokenServer;
 }
 
-// Leave UID empty by default so client.join(..., null) auto-assigns a unique numeric UID.
-uidInput.value = "";
+function showErrorBanner(message: string): void {
+  errorText.textContent = message;
+  errorBanner.hidden = false;
+}
+
+function clearErrorBanner(): void {
+  errorText.textContent = "";
+  errorBanner.hidden = true;
+}
 
 function appendLog(message: string, level: "info" | "warn" | "error" = "info"): void {
   const item = document.createElement("li");
@@ -70,7 +76,7 @@ function renderRemoteParticipants(participants: RemoteAudioParticipant[]): void 
   if (participants.length === 0) {
     const empty = document.createElement("li");
     empty.className = "remote-empty";
-    empty.textContent = "No remote audio participants yet. Join with a different UID in a second browser tab.";
+    empty.textContent = "No remote audio participants yet. Join in a second browser tab.";
     remoteList.appendChild(empty);
     return;
   }
@@ -87,8 +93,6 @@ function renderRemoteParticipants(participants: RemoteAudioParticipant[]): void 
 function setInputsDisabled(disabled: boolean): void {
   appIdInput.disabled = disabled;
   channelInput.disabled = disabled;
-  uidInput.disabled = disabled;
-  tokenInput.disabled = disabled;
   tokenServerInput.disabled = disabled;
 }
 
@@ -107,14 +111,14 @@ function updateStateUi(state: CallConnectionState, activeChannel: string, active
   signalIndicator.hidden = state !== "connected";
   if (state === "idle") {
     statusBadge.textContent = "Disconnected";
-    localSummary.textContent = "Enter your App ID, channel, and token (or token server) to join. UID is auto-assigned when blank.";
+    localSummary.textContent = "Uses APP_ID, CHANNEL_NAME & TOKEN_SERVER from secrets. UID is auto-assigned via null.";
     setInputsDisabled(false);
     joinButton.disabled = false;
     muteButton.disabled = true;
     leaveButton.disabled = true;
   } else if (state === "joining") {
     statusBadge.textContent = "Joining…";
-    localSummary.textContent = `Connecting to channel "${activeChannel}"…`;
+    localSummary.textContent = `Fetching token and connecting to "${activeChannel}"…`;
     setInputsDisabled(true);
     joinButton.disabled = true;
     muteButton.disabled = true;
@@ -140,23 +144,21 @@ const voiceClient = new AgoraWebVoiceClient({
   onMuteChange: updateMuteUi,
   onRemoteParticipantsChange: renderRemoteParticipants,
   onNetworkQualityChange: updateSignalUi,
+  onError: showErrorBanner,
   onLog: appendLog
 });
 
 joinButton.addEventListener("click", async () => {
-  const rawUid = uidInput.value.trim();
-  const parsedUid = rawUid.length > 0 ? Number(rawUid) : null;
+  clearErrorBanner();
   try {
     await voiceClient.join({
       appId: appIdInput.value,
       channelName: channelInput.value,
-      uid: parsedUid,
-      tempToken: tokenInput.value,
       tokenServerUrl: tokenServerInput.value
     });
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    appendLog(`Unable to start voice call: ${reason}`, "error");
+    showErrorBanner(reason);
   }
 });
 
@@ -165,6 +167,7 @@ muteButton.addEventListener("click", async () => {
     await voiceClient.toggleMute();
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
+    showErrorBanner(`Mute toggle failed: ${reason}`);
     appendLog(`Mute toggle failed: ${reason}`, "error");
   }
 });
@@ -174,6 +177,7 @@ leaveButton.addEventListener("click", async () => {
     await voiceClient.leave();
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
+    showErrorBanner(`Leave error: ${reason}`);
     appendLog(`Leave error: ${reason}`, "error");
   }
 });

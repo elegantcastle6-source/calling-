@@ -16,9 +16,7 @@ export interface RemoteAudioParticipant {
 export interface VoiceCallConfig {
   appId: string;
   channelName: string;
-  uid: number | null;
-  tempToken?: string | null;
-  tokenServerUrl?: string | null;
+  tokenServerUrl: string;
 }
 
 export interface NetworkQualitySnapshot {
@@ -34,6 +32,7 @@ export interface VoiceClientCallbacks {
   onMuteChange: (muted: boolean) => void;
   onRemoteParticipantsChange: (participants: RemoteAudioParticipant[]) => void;
   onNetworkQualityChange?: (quality: NetworkQualitySnapshot) => void;
+  onError?: (message: string) => void;
   onLog: (message: string, level?: "info" | "warn" | "error") => void;
 }
 
@@ -66,8 +65,7 @@ export function mapNetworkQuality(uplink: number, downlink: number): NetworkQual
 
 /**
  * Audio-only Agora RTC Web SDK 4.x client using the Communication profile (`mode: "rtc"`).
- * Publishes local microphone audio, subscribes to remote audio tracks, supports mute/unmute
- * and clean leave, and never creates or subscribes to video tracks.
+ * Fetches tokens strictly from `${TOKEN_SERVER}?channel=${CHANNEL_NAME}` and joins with `uid = null`.
  */
 export class AgoraWebVoiceClient {
   private readonly client: IAgoraRTCClient;
@@ -77,12 +75,17 @@ export class AgoraWebVoiceClient {
   private activeConfig: VoiceCallConfig | null = null;
   private joinedUid: UID | null = null;
   private isMuted = false;
+  private isRejoining = false;
 
   constructor(callbacks: VoiceClientCallbacks) {
     this.callbacks = callbacks;
-    // Communication profile ("rtc") for two-way voice calling where all peers publish & subscribe audio.
     this.client = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
     this.registerEvents();
+  }
+
+  private reportError(message: string): void {
+    this.callbacks.onLog(message, "error");
+    this.callbacks.onError?.(message);
   }
 
   private registerEvents(): void {
@@ -95,31 +98,23 @@ export class AgoraWebVoiceClient {
     };
 
     this.client.on("user-published", async (user: IAgoraRTCRemoteUser, mediaType: "audio" | "video") => {
-      console.log("Remote user published:", user.uid, mediaType);
-
-      // Strictly audio-only: ignore video publications.
       if (mediaType !== "audio") return;
 
       try {
         await this.client.subscribe(user, mediaType);
-
-        if (mediaType === "audio" && user.audioTrack) {
+        if (user.audioTrack) {
           user.audioTrack.play();
-          console.log("Remote audio is playing");
         }
-
         this.remoteParticipants.set(user.uid, { uid: user.uid, hasAudio: true });
         this.emitRemoteParticipants();
         this.callbacks.onLog(`Subscribed to remote audio from UID ${user.uid}.`, "info");
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
-        console.error("Failed to subscribe to remote user:", user.uid, mediaType, err);
-        this.callbacks.onLog(`Failed to subscribe to remote UID ${user.uid}: ${reason}`, "error");
+        this.reportError(`Failed to subscribe to remote UID ${user.uid}: ${reason}`);
       }
     });
 
     this.client.on("user-unpublished", (user: IAgoraRTCRemoteUser, mediaType: "audio" | "video") => {
-      console.log("Remote user unpublished:", user.uid, mediaType);
       if (mediaType !== "audio") return;
       user.audioTrack?.stop();
       if (this.remoteParticipants.has(user.uid)) {
@@ -142,50 +137,92 @@ export class AgoraWebVoiceClient {
     });
 
     this.client.on("token-privilege-will-expire", async () => {
-      this.callbacks.onLog("RTC token privilege is about to expire; attempting renewal...", "warn");
-      await this.renewTokenFromServer();
+      this.callbacks.onLog("token-privilege-will-expire fired; fetching fresh token...", "warn");
+      const config = this.activeConfig;
+      if (!config) return;
+      try {
+        const newToken = await this.fetchTokenFromServer(config.tokenServerUrl, config.channelName);
+        await this.client.renewToken(newToken);
+        this.callbacks.onLog("Renewed RTC token via client.renewToken(newToken).", "info");
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        this.reportError(`Token renewal failed (will-expire): ${reason}`);
+      }
     });
 
     this.client.on("token-privilege-did-expire", async () => {
-      this.callbacks.onLog("RTC token expired. Renewing from token server or generate a fresh token.", "error");
-      await this.renewTokenFromServer();
+      if (this.isRejoining) return;
+      const config = this.activeConfig;
+      if (!config) return;
+      this.isRejoining = true;
+      this.callbacks.onLog("token-privilege-did-expire fired; fetching new token and rejoining...", "warn");
+      this.callbacks.onStateChange("joining", config.channelName, this.joinedUid);
+
+      try {
+        const newToken = await this.fetchTokenFromServer(config.tokenServerUrl, config.channelName);
+        if (this.client.connectionState !== "DISCONNECTED") {
+          try {
+            await this.client.leave();
+          } catch {
+            // Ignore leave errors if already disconnected.
+          }
+        }
+        this.remoteParticipants.clear();
+        this.emitRemoteParticipants();
+
+        const rejoinedUid = await this.client.join(config.appId, config.channelName, newToken, null);
+        this.joinedUid = rejoinedUid;
+
+        if (!this.localAudioTrack) {
+          this.localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack();
+          await this.localAudioTrack.setMuted(this.isMuted);
+        }
+        await this.client.publish([this.localAudioTrack]);
+        this.callbacks.onStateChange("connected", config.channelName, this.joinedUid);
+        this.callbacks.onLog(`Rejoined channel "${config.channelName}" as UID ${rejoinedUid}.`, "info");
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        this.reportError(`Token expired rejoin failed (did-expire): ${reason}`);
+        await this.cleanupTracksAndReset();
+      } finally {
+        this.isRejoining = false;
+      }
     });
   }
 
   public async join(config: VoiceCallConfig): Promise<void> {
     const cleanAppId = config.appId.trim();
     const cleanChannel = config.channelName.trim();
+    const cleanTokenServer = config.tokenServerUrl.trim();
     if (!cleanAppId) {
-      throw new Error("Agora App ID is required.");
+      const msg = "Missing APP_ID secret.";
+      this.reportError(msg);
+      throw new Error(msg);
     }
     if (!cleanChannel) {
-      throw new Error("Channel name is required.");
+      const msg = "Missing CHANNEL_NAME secret.";
+      this.reportError(msg);
+      throw new Error(msg);
     }
-    if (
-      config.uid !== null &&
-      (!Number.isInteger(config.uid) || config.uid < 0 || config.uid > 0xffffffff)
-    ) {
-      throw new Error("RTC UID must be an unsigned 32-bit integer (or leave blank to auto-assign).");
+    if (!cleanTokenServer) {
+      const msg = "Missing TOKEN_SERVER secret.";
+      this.reportError(msg);
+      throw new Error(msg);
     }
-
-    const joinUid: number | null = config.uid === 0 ? null : config.uid;
 
     this.activeConfig = {
-      ...config,
       appId: cleanAppId,
       channelName: cleanChannel,
-      uid: joinUid
+      tokenServerUrl: cleanTokenServer
     };
     this.callbacks.onStateChange("joining", cleanChannel, null);
 
     try {
-      const resolvedToken = await this.resolveJoinToken(this.activeConfig);
-      const uid = await this.client.join(cleanAppId, cleanChannel, resolvedToken, joinUid);
-      console.log("Local user joined:", uid);
+      const token = await this.fetchTokenFromServer(cleanTokenServer, cleanChannel);
+      const uid = await this.client.join(cleanAppId, cleanChannel, token, null);
       this.joinedUid = uid;
       this.callbacks.onLog(`Joined channel "${cleanChannel}" as UID ${uid}.`, "info");
 
-      // Audio-only track: never request camera or create video tracks.
       this.localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack();
       this.isMuted = false;
       this.callbacks.onMuteChange(false);
@@ -196,7 +233,7 @@ export class AgoraWebVoiceClient {
     } catch (err) {
       await this.cleanupTracksAndReset();
       const reason = err instanceof Error ? err.message : String(err);
-      this.callbacks.onLog(`Join failed: ${reason}`, "error");
+      this.reportError(`Join failed: ${reason}`);
       throw err;
     }
   }
@@ -226,6 +263,7 @@ export class AgoraWebVoiceClient {
       this.activeConfig = null;
       this.joinedUid = null;
       this.isMuted = false;
+      this.isRejoining = false;
       this.remoteParticipants.clear();
       this.emitRemoteParticipants();
       this.callbacks.onNetworkQualityChange?.(mapNetworkQuality(0, 0));
@@ -248,6 +286,7 @@ export class AgoraWebVoiceClient {
     this.activeConfig = null;
     this.joinedUid = null;
     this.isMuted = false;
+    this.isRejoining = false;
     this.remoteParticipants.clear();
     this.emitRemoteParticipants();
     this.callbacks.onNetworkQualityChange?.(mapNetworkQuality(0, 0));
@@ -255,69 +294,46 @@ export class AgoraWebVoiceClient {
     this.callbacks.onStateChange("idle", "", null);
   }
 
-  private async resolveJoinToken(config: VoiceCallConfig): Promise<string | null> {
-    const manualToken = config.tempToken?.trim();
-    if (manualToken) {
-      return manualToken;
-    }
-    const serverUrl = config.tokenServerUrl?.trim();
-    if (serverUrl) {
-      this.callbacks.onLog("Requesting publisher RTC token from token server...", "info");
-      return this.fetchTokenFromServer(serverUrl, config.channelName, config.uid ?? 0);
-    }
-    return null;
-  }
+  private async fetchTokenFromServer(baseUrl: string, channelName: string): Promise<string> {
+    const cleanServer = baseUrl.trim();
+    const cleanChannel = channelName.trim();
+    const separator = cleanServer.includes("?") ? "&" : "?";
+    const requestUrl = `${cleanServer}${separator}channel=${encodeURIComponent(cleanChannel)}`;
 
-  private async renewTokenFromServer(): Promise<void> {
-    const config = this.activeConfig;
-    const serverUrl = config?.tokenServerUrl?.trim();
-    if (!config || !serverUrl) {
-      this.callbacks.onLog(
-        "No token server URL configured. Generate a new temporary token in Agora Console or connect a token server.",
-        "warn"
-      );
-      return;
-    }
-
+    let response: Response;
     try {
-      const renewalUid = typeof this.joinedUid === "number" ? this.joinedUid : (config.uid ?? 0);
-      const freshToken = await this.fetchTokenFromServer(serverUrl, config.channelName, renewalUid);
-      await this.client.renewToken(freshToken);
-      this.callbacks.onLog("Renewed RTC token successfully.", "info");
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      this.callbacks.onLog(`Token renewal failed: ${reason}`, "error");
+      response = await fetch(requestUrl, { method: "GET", cache: "no-store" });
+    } catch (networkErr) {
+      const msg = networkErr instanceof Error ? networkErr.message : String(networkErr);
+      throw new Error(`Fetch failed (${requestUrl}): ${msg}`);
     }
-  }
 
-  private async fetchTokenFromServer(
-    baseUrl: string,
-    channelName: string,
-    uid: number
-  ): Promise<string> {
-    const url = new URL(baseUrl);
-    url.searchParams.set("channelName", channelName);
-    url.searchParams.set("channel", channelName);
-    url.searchParams.set("uid", String(uid));
-    url.searchParams.set("role", "publisher");
-
-    const response = await fetch(url.toString(), { method: "GET" });
-    if (!response.ok) {
-      throw new Error(`Token server returned HTTP ${response.status}.`);
-    }
-    const bodyText = (await response.text()).trim();
-    if (bodyText.startsWith("{")) {
-      const parsed = JSON.parse(bodyText) as { rtcToken?: string; token?: string };
-      const token = (parsed.rtcToken ?? parsed.token ?? "").trim();
-      if (!token) {
-        throw new Error("Token server response did not include rtcToken.");
+    const bodyText = await response.text();
+    let parsed: { token?: unknown; error?: unknown; message?: unknown };
+    try {
+      parsed = JSON.parse(bodyText) as { token?: unknown; error?: unknown; message?: unknown };
+    } catch {
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${bodyText.trim() || response.statusText}`);
       }
-      return token;
+      throw new Error(`Invalid JSON from token server: ${bodyText.slice(0, 160) || "empty response"}`);
     }
-    if (!bodyText) {
-      throw new Error("Token server returned an empty response.");
+
+    if (!response.ok) {
+      const errMsg =
+        typeof parsed.error === "string"
+          ? parsed.error
+          : typeof parsed.message === "string"
+            ? parsed.message
+            : `Token server returned HTTP ${response.status}.`;
+      throw new Error(errMsg);
     }
-    return bodyText;
+
+    const token = typeof parsed.token === "string" ? parsed.token.trim() : "";
+    if (!token) {
+      throw new Error("Token server response returned an empty token.");
+    }
+    return token;
   }
 
   private emitRemoteParticipants(): void {
