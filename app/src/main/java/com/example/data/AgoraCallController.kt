@@ -5,6 +5,7 @@ import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.SurfaceView
 import android.widget.Toast
 import com.example.BuildConfig
 import io.agora.rtc2.ChannelMediaOptions
@@ -12,6 +13,7 @@ import io.agora.rtc2.Constants
 import io.agora.rtc2.IRtcEngineEventHandler
 import io.agora.rtc2.RtcEngine
 import io.agora.rtc2.RtcEngineConfig
+import io.agora.rtc2.video.VideoCanvas
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -84,6 +86,15 @@ class AgoraCallController(
 
     @Volatile
     private var lastLowDataMode: Boolean = true
+
+    @Volatile
+    private var lastWithVideo: Boolean = false
+
+    // Surfaces handed over by the call screen. They may arrive before the RTC engine exists
+    // (the engine is created only after the token is fetched), so we remember them and bind
+    // them as soon as the engine is ready.
+    private var localSurface: SurfaceView? = null
+    private val remoteSurfaces = mutableMapOf<Int, SurfaceView>()
 
     val isConfigured: Boolean
         get() = isValidAppId(myAppId)
@@ -310,6 +321,8 @@ class AgoraCallController(
             channelProfile = Constants.CHANNEL_PROFILE_COMMUNICATION
             publishMicrophoneTrack = true
             autoSubscribeAudio = true
+            publishCameraTrack = lastWithVideo
+            autoSubscribeVideo = lastWithVideo
         }
         activeChannelName = resolvedChannel
         activeUid = uid
@@ -321,7 +334,8 @@ class AgoraCallController(
         isSpeakerDefault: Boolean,
         isLowDataMode: Boolean,
         listener: AgoraCallListener,
-        uid: Int = 0
+        uid: Int = 0,
+        withVideo: Boolean = false
     ): Boolean {
         if (!isConfigured) {
             Log.w(INIT_ERROR_TAG, "Agora App ID is missing or still set to a placeholder.")
@@ -331,6 +345,7 @@ class AgoraCallController(
         val resolvedChannel = resolveChannelName(configuredChannelName, channelName)
         lastSpeakerDefault = isSpeakerDefault
         lastLowDataMode = isLowDataMode
+        lastWithVideo = withVideo
 
         if (!tokenProvider.isConfigured) {
             val message = "Missing AGORA_TOKEN_SERVER_URL in AI Studio Secrets."
@@ -398,6 +413,23 @@ class AgoraCallController(
                 }
 
                 engine.enableAudio()
+                if (lastWithVideo) {
+                    // Video must be enabled BEFORE joining so the camera track gets published.
+                    engine.enableVideo()
+                    engine.enableLocalVideo(true)
+                    engine.muteLocalVideoStream(false)
+                    runOnMainThread {
+                        synchronized(lock) {
+                            mRtcEngine?.let { e ->
+                                applyLocalCanvas(e)
+                                applyRemoteCanvases(e)
+                                e.startPreview()
+                            }
+                        }
+                    }
+                } else {
+                    engine.disableVideo()
+                }
                 engine.setClientRole(Constants.CLIENT_ROLE_BROADCASTER)
                 engine.setAudioProfile(
                     if (isLowDataMode) {
@@ -459,6 +491,123 @@ class AgoraCallController(
         }
     }
 
+    // ----- Video -----
+
+    private fun applyLocalCanvas(engine: RtcEngine) {
+        val view = localSurface ?: return
+        engine.setupLocalVideo(VideoCanvas(view, VideoCanvas.RENDER_MODE_HIDDEN, 0))
+    }
+
+    private fun applyRemoteCanvases(engine: RtcEngine) {
+        remoteSurfaces.forEach { (uid, view) ->
+            engine.setupRemoteVideo(VideoCanvas(view, VideoCanvas.RENDER_MODE_HIDDEN, uid))
+        }
+    }
+
+    /** Binds the local camera preview to [view]. Safe to call before the engine exists. */
+    fun attachLocalVideo(view: SurfaceView) {
+        runOnMainThread {
+            synchronized(lock) {
+                localSurface = view
+                val engine = mRtcEngine
+                if (engine != null && lastWithVideo) {
+                    try {
+                        engine.enableVideo()
+                        applyLocalCanvas(engine)
+                        engine.startPreview()
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "Failed to attach local video", t)
+                    }
+                }
+            }
+        }
+    }
+
+    fun detachLocalVideo() {
+        runOnMainThread {
+            synchronized(lock) {
+                localSurface = null
+                try {
+                    mRtcEngine?.setupLocalVideo(VideoCanvas(null, VideoCanvas.RENDER_MODE_HIDDEN, 0))
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Failed to detach local video", t)
+                }
+            }
+        }
+    }
+
+    /** Binds the remote user's video stream to [view]. Safe to call before the engine exists. */
+    fun attachRemoteVideo(uid: Int, view: SurfaceView) {
+        runOnMainThread {
+            synchronized(lock) {
+                remoteSurfaces[uid] = view
+                val engine = mRtcEngine
+                if (engine != null) {
+                    try {
+                        engine.setupRemoteVideo(VideoCanvas(view, VideoCanvas.RENDER_MODE_HIDDEN, uid))
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "Failed to attach remote video", t)
+                    }
+                }
+            }
+        }
+    }
+
+    fun detachRemoteVideo(uid: Int) {
+        runOnMainThread {
+            synchronized(lock) {
+                remoteSurfaces.remove(uid)
+                try {
+                    mRtcEngine?.setupRemoteVideo(VideoCanvas(null, VideoCanvas.RENDER_MODE_HIDDEN, uid))
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Failed to detach remote video", t)
+                }
+            }
+        }
+    }
+
+    /** Turns the local camera on/off while staying in the call. */
+    fun setCameraEnabled(enabled: Boolean) {
+        synchronized(lock) {
+            val engine = mRtcEngine ?: return
+            try {
+                if (enabled) {
+                    lastWithVideo = true
+                    engine.enableVideo()
+                    engine.enableLocalVideo(true)
+                    engine.muteLocalVideoStream(false)
+                    engine.updateChannelMediaOptions(
+                        ChannelMediaOptions().apply {
+                            publishCameraTrack = true
+                            autoSubscribeVideo = true
+                        }
+                    )
+                    runOnMainThread {
+                        synchronized(lock) {
+                            mRtcEngine?.let { applyLocalCanvas(it) }
+                            mRtcEngine?.startPreview()
+                        }
+                    }
+                } else {
+                    engine.muteLocalVideoStream(true)
+                    engine.enableLocalVideo(false)
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to toggle camera", t)
+            }
+        }
+    }
+
+    fun switchCamera() {
+        synchronized(lock) {
+            try {
+                mRtcEngine?.switchCamera()
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to switch camera", t)
+            }
+        }
+    }
+
     fun leaveCall() {
         synchronized(lock) {
             tokenJob?.cancel()
@@ -470,6 +619,9 @@ class AgoraCallController(
             val engine = mRtcEngine
             if (engine != null) {
                 try {
+                    if (lastWithVideo) {
+                        engine.stopPreview()
+                    }
                     if (isInChannel) {
                         engine.leaveChannel()
                         isInChannel = false
@@ -516,9 +668,9 @@ class AgoraCallController(
         private const val INIT_ERROR_TAG = "AgoraInitError"
 
         /**
-         * `io.agora.rtc:voice-sdk:4.5.0` is audio-only.
+         * `io.agora.rtc:full-sdk:4.5.0` supports both voice and video.
          */
-        const val SUPPORTS_VIDEO: Boolean = false
+        const val SUPPORTS_VIDEO: Boolean = true
 
         private val PLACEHOLDER_VALUES = setOf(
             "",
