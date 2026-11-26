@@ -1,11 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { APP_ID, CHANNEL_NAME, TOKEN_SERVER_URL } from "@/config";
 import { useRingtone } from "@/hooks/useRingtone";
 
-// Ye teeno secret nahi hain, isliye seedha likh diye hain
-const APP_ID = "276428506b1646179810c6bd6b559072";
-const CHANNEL = "just-chat-dfc03";
-const TOKEN_SERVER = "https://agora-token-server-mauve.vercel.app/api/token";
 const RING_TIMEOUT_MS = 45_000;
 
 type RemoteInfo = { video: boolean; audio: boolean };
@@ -114,7 +111,7 @@ export default function OneToOneCall() {
 
   useEffect(() => {
     if (typeof BroadcastChannel !== "undefined") {
-      const bc = new BroadcastChannel(`justchat_ring_${CHANNEL}`);
+      const bc = new BroadcastChannel(`justchat_ring_${CHANNEL_NAME}`);
       signalChannelRef.current = bc;
       bc.onmessage = (event) => {
         const msg = event.data as { type?: string; senderId?: string } | null;
@@ -145,7 +142,7 @@ export default function OneToOneCall() {
   }, []);
 
   async function getToken() {
-    const r = await fetch(`${TOKEN_SERVER}?channel=${encodeURIComponent(CHANNEL)}`);
+    const r = await fetch(`${TOKEN_SERVER_URL}?channel=${encodeURIComponent(CHANNEL_NAME)}`);
     const d = await r.json();
     if (!d.token) throw new Error("Token empty: " + JSON.stringify(d));
     setFlag("token", true);
@@ -252,7 +249,7 @@ export default function OneToOneCall() {
 
       // Token lekar join
       const token = await getToken();
-      await client.join(APP_ID, CHANNEL, token, null);
+      await client.join(APP_ID, CHANNEL_NAME, token, null);
       setFlag("joined", true);
 
       // Mic + camera (Agora ke tracks)
@@ -323,7 +320,7 @@ export default function OneToOneCall() {
 
       {ringState === "ringing_incoming" && (
         <div style={{ background: "#1e293b", padding: 12, borderRadius: 8, marginBottom: 8 }}>
-          <div style={{ marginBottom: 8 }}>Incoming call on channel {CHANNEL}…</div>
+          <div style={{ marginBottom: 8 }}>Incoming call on channel {CHANNEL_NAME}…</div>
           <button style={{ ...btn, background: "#16a34a" }} onClick={answerIncomingCall}>
             Answer
           </button>
