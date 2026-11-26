@@ -739,7 +739,8 @@ class JustChatViewModel(
                 channelName = channelName,
                 isSpeakerDefault = true,
                 isLowDataMode = lowDataMode,
-                listener = createAgoraListener(callId = callId, contactName = contact.name)
+                listener = createAgoraListener(callId = callId, contactName = contact.name),
+                withVideo = type == CallType.VIDEO
             )
         }
     }
@@ -813,7 +814,8 @@ class JustChatViewModel(
                 channelName = resolvedChannel,
                 isSpeakerDefault = current.isSpeakerOn,
                 isLowDataMode = current.isLowDataMode,
-                listener = createAgoraListener(callId = current.callId, contactName = current.contact.name)
+                listener = createAgoraListener(callId = current.callId, contactName = current.contact.name),
+                withVideo = current.callType == CallType.VIDEO
             )
         } else {
             _activeCall.update {
@@ -837,12 +839,26 @@ class JustChatViewModel(
 
     fun toggleCamera() {
         val current = _activeCall.value ?: return
-        _activeCall.update { it?.copy(isCameraOn = !current.isCameraOn) }
+        val nextCameraOn = !current.isCameraOn
+        _activeCall.update { it?.copy(isCameraOn = nextCameraOn) }
+        if (current.isAgoraConfigured) {
+            agoraController.setCameraEnabled(nextCameraOn)
+        }
     }
 
     fun toggleCameraFacing() {
         _activeCall.update { it?.copy(isFrontCamera = !it.isFrontCamera) }
+        if (_activeCall.value?.isAgoraConfigured == true) {
+            agoraController.switchCamera()
+        }
     }
+
+    // Agora video surfaces (wired from CallScreen via MainActivity)
+    fun attachLocalVideo(view: android.view.SurfaceView) = agoraController.attachLocalVideo(view)
+    fun detachLocalVideo() = agoraController.detachLocalVideo()
+    fun attachRemoteVideo(uid: Int, view: android.view.SurfaceView) =
+        agoraController.attachRemoteVideo(uid, view)
+    fun detachRemoteVideo(uid: Int) = agoraController.detachRemoteVideo(uid)
 
     fun toggleSpeaker() {
         val current = _activeCall.value ?: return
