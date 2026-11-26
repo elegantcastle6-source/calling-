@@ -370,7 +370,11 @@ private fun AuthenticatedJustChatContent(
                                 }
                             },
                             onEndCall = { viewModel.endCall() },
-                            onToggleSpeaker = { viewModel.toggleSpeaker() }
+                            onToggleSpeaker = { viewModel.toggleSpeaker() },
+                            onAttachLocalVideo = { viewModel.attachLocalVideo(it) },
+                            onDetachLocalVideo = { viewModel.detachLocalVideo() },
+                            onAttachRemoteVideo = { uid, view -> viewModel.attachRemoteVideo(uid, view) },
+                            onDetachRemoteVideo = { uid -> viewModel.detachRemoteVideo(uid) }
                         )
                     }
                 }
