@@ -183,12 +183,12 @@ export default function OneToOneCall() {
           el = document.createElement("div");
           el.id = "remote-" + user.uid;
           el.style.width = "100%";
-          el.style.minHeight = "300px";
+          el.style.height = "300px";
           el.style.background = "#000";
           el.style.marginTop = "8px";
           remoteBoxRef.current?.appendChild(el);
         }
-        user.videoTrack.play(el);
+        user.videoTrack.play(el, { fit: "cover" });
       }
       if (mediaType === "audio" && user.audioTrack) {
         user.audioTrack.play();
