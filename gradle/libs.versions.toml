@@ -98,7 +98,7 @@ firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging
 androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
 androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
-agora-rtc-voice = { group = "io.agora.rtc", name = "voice-sdk", version.ref = "agoraRtc" }
+agora-rtc-voice = { group = "io.agora.rtc", name = "full-sdk", version.ref = "agoraRtc" }
 
 
 [plugins]
